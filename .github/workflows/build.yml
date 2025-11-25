@@ -1,50 +1,40 @@
 name: Build and Release Python Executables
 
-# 触发条件：每次 push 一个 v* 开头的 tag
 on:
   push:
     tags:
       - "v*"
 
 jobs:
-  # 构建任务
   build:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
 
-    # 同时在 Windows 和 macOS 上构建
     strategy:
       matrix:
         os: [windows-latest, macos-latest]
 
     steps:
-      # 1️⃣ 拉取代码
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 2️⃣ 设置 Python 3.12
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
 
-      # 3️⃣ 安装脚本依赖
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # 4️⃣ 使用 PyInstaller 打包为单文件可执行文件
       - name: Build executable
         run: |
           pyinstaller --onefile video_excel_download.py
 
-      # 5️⃣ 重命名构建产物，并加上 tag 版本号
-      # Windows 默认 shell 是 PowerShell，所以使用 bash
       - name: Rename artifacts with version
         shell: bash
         run: |
-          # 获取 tag 名，如 v1.0.0
           VERSION=${GITHUB_REF##*/}
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             mv dist/video_excel_download.exe video_download-windows-${VERSION}.exe
@@ -52,35 +42,38 @@ jobs:
             mv dist/video_excel_download video_download-macos-${VERSION}
           fi
 
-      # 6️⃣ 上传 artifacts，供 release job 使用
+      # ✅ 修复：使用通配符匹配文件，而不是变量
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: binaries
-          path: |
-            video_download-windows-${GITHUB_REF##*/}.exe
-            video_download-macos-${GITHUB_REF##*/}
-          if-no-files-found: ignore
+          name: binaries-${{ matrix.os }}  # ✅ 每个 OS 使用不同的 artifact 名
+          path: video_download-*  # ✅ 使用通配符匹配
+          if-no-files-found: error  # ✅ 如果没找到文件就报错
 
-  # 发布 Release
   release:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ 下载构建好的 artifact
-      - name: Download binaries
+      # ✅ 下载所有 artifacts
+      - name: Download Windows binaries
         uses: actions/download-artifact@v4
         with:
-          name: binaries
+          name: binaries-windows-latest
 
-      # 2️⃣ 创建 GitHub Release 并上传可执行文件
+      - name: Download macOS binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-macos-latest
+
+      # ✅ 列出文件（用于调试）
+      - name: List files
+        run: ls -R
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            video_download-windows-${GITHUB_REF##*/}.exe
-            video_download-macos-${GITHUB_REF##*/}
+          files: video_download-*  # ✅ 使用通配符匹配所有文件
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
