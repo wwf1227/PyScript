@@ -1,1 +1,81 @@
+name: Build and Release Python Executables
 
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2. 设置 Python 3.12
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      # 3. 安装脚本依赖（requests、pandas 等）
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # 4. PyInstaller 打包
+      - name: Build executable
+        run: |
+          pyinstaller --onefile video_excel_download.py
+
+      # 5. 给不同系统的结果命名
+      - name: Rename artifacts
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then 
+            mv dist/video_excel_download.exe video_download-windows.exe; 
+          else 
+            mv dist/video_excel_download video_download-macos; 
+          fi
+
+      # 6. 上传构建产物供下一步使用
+      - name: Upload binaries
+        uses: actions/upload-artifact@v3
+        with:
+          name: binaries-${{ matrix.os }}
+          path: |
+            video_download-windows.exe
+            video_download-macos
+          if-no-files-found: ignore
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: binaries-windows-latest
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: binaries-macos-latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            video_download-windows.exe
+            video_download-macos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
