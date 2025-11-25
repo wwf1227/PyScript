@@ -57,6 +57,8 @@ jobs:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       # ✅ 下载所有 artifacts
@@ -79,4 +81,4 @@ jobs:
         with:
           files: video_download-*  # ✅ 使用通配符匹配所有文件
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
