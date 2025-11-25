@@ -1,81 +1,92 @@
 name: Build and Release Python Executables
 
+# 触发条件：每次 push 一个 v* 开头的 tag
 on:
   push:
     tags:
       - "v*"
 
 jobs:
+  # 构建任务
   build:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
 
+    # 同时在 Windows 和 macOS 上构建
     strategy:
       matrix:
         os: [windows-latest, macos-latest]
 
     steps:
-      # 1. 拉取代码
+      # 1️⃣ 拉取代码
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 2. 设置 Python 3.12
+      # 2️⃣ 设置 Python 3.12
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
 
-      # 3. 安装脚本依赖（requests、pandas 等）
+      # 3️⃣ 安装脚本依赖
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # 4. PyInstaller 打包
+      # 4️⃣ 使用 PyInstaller 打包为单文件可执行文件
       - name: Build executable
         run: |
           pyinstaller --onefile video_excel_download.py
 
-      # 5. 给不同系统的结果命名
-      - name: Rename artifacts
+      # 5️⃣ 重命名构建产物，并加上 tag 版本号
+      # Windows 默认 shell 是 PowerShell，所以使用 bash
+      - name: Rename artifacts with version
+        shell: bash
         run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then 
-            mv dist/video_excel_download.exe video_download-windows.exe; 
-          else 
-            mv dist/video_excel_download video_download-macos; 
+          # 获取 tag 名，如 v1.0.0
+          VERSION=${GITHUB_REF##*/}
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            mv dist/video_excel_download.exe video_download-windows-${VERSION}.exe
+          else
+            mv dist/video_excel_download video_download-macos-${VERSION}
           fi
 
-      # 6. 上传构建产物供下一步使用
+      # 6️⃣ 上传 artifacts，供 release job 使用
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.os }}
           path: |
-            video_download-windows.exe
-            video_download-macos
+            video_download-windows-${GITHUB_REF##*/}.exe
+            video_download-macos-${GITHUB_REF##*/}
           if-no-files-found: ignore
 
+  # 发布 Release
   release:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ 下载 Windows 构建产物
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
-          name: artifacts-windows-latest
+          name: binaries-windows-latest
 
+      # 2️⃣ 下载 macOS 构建产物
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: artifacts-macos-latest
+          name: binaries-macos-latest
 
+      # 3️⃣ 创建 GitHub Release 并上传可执行文件
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            video_download-windows.exe
-            video_download-macos
+            video_download-windows-${GITHUB_REF##*/}.exe
+            video_download-macos-${GITHUB_REF##*/}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
