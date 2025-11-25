@@ -56,7 +56,7 @@ jobs:
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.os }}
+          name: binaries
           path: |
             video_download-windows-${GITHUB_REF##*/}.exe
             video_download-macos-${GITHUB_REF##*/}
@@ -69,19 +69,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ 下载 Windows 构建产物
-      - name: Download Windows artifact
+      # 1️⃣ 下载构建好的 artifact
+      - name: Download binaries
         uses: actions/download-artifact@v4
         with:
-          name: binaries-windows-latest
+          name: binaries
 
-      # 2️⃣ 下载 macOS 构建产物
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: binaries-macos-latest
-
-      # 3️⃣ 创建 GitHub Release 并上传可执行文件
+      # 2️⃣ 创建 GitHub Release 并上传可执行文件
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
