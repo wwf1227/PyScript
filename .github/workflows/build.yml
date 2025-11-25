@@ -19,10 +19,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -45,40 +45,33 @@ jobs:
             mv dist/video_excel_download video_download-macos-${VERSION}
           fi
 
-      # ✅ 修复：使用通配符匹配文件，而不是变量
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.os }}  # ✅ 每个 OS 使用不同的 artifact 名
-          path: video_download-*  # ✅ 使用通配符匹配
-          if-no-files-found: error  # ✅ 如果没找到文件就报错
+          name: binaries-${{ matrix.os }}
+          path: video_download-*
+          if-no-files-found: error
 
   release:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
 
     steps:
-      # ✅ 下载所有 artifacts
-      - name: Download Windows binaries
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: binaries-windows-latest
+          path: release-artifacts
 
-      - name: Download macOS binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: binaries-macos-latest
-
-      # ✅ 列出文件（用于调试）
-      - name: List files
-        run: ls -R
+      - name: List downloaded files for debug
+        run: ls -R release-artifacts
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: video_download-*  # ✅ 使用通配符匹配所有文件
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          name: "Release ${{ github.ref_name }}"  # ✅ 更清晰的 release 名称
+          body: "Automated release of video download executables for Windows and macOS."
+          files: release-artifacts/*/*.*
