@@ -1,0 +1,76 @@
+name: Run Python Script
+
+# 触发条件
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      python_file:
+        description: 'Python 文件路径(相对于项目根目录)'
+        required: true
+        default: 'feishu_sync_optimized.py'
+  
+  # 推送到主分支时触发
+  # push:
+  #   branches:
+  #     - main
+  #     - master
+  
+  # Pull Request 时触发
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - master
+  
+  # 定时触发(示例: 每天 UTC 时间 0:00 执行)
+  # schedule:
+  #   - cron: '0 0 * * *'
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 检出代码
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    # 设置 Python 环境
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'  # 可以修改为你需要的 Python 版本
+        cache: 'pip'  # 缓存 pip 依赖
+    
+    # 安装依赖(如果有 requirements.txt)
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+    
+    # 执行 Python 脚本
+    - name: Run Python script
+      run: |
+        # 如果是手动触发，使用输入的文件路径；否则使用默认路径
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          python "${{ github.event.inputs.python_file }}"
+        else
+          python main.py  # 修改为你的默认 Python 文件路径
+        fi
+      env:
+        # 可以在这里添加环境变量
+        # MY_ENV_VAR: ${{ secrets.MY_SECRET }}
+        PYTHONUNBUFFERED: 1  # 确保 Python 输出不被缓冲
+    
+    # 上传执行结果或日志(可选)
+    - name: Upload logs
+      if: always()  # 即使前面步骤失败也执行
+      uses: actions/upload-artifact@v4
+      with:
+        name: execution-logs
+        path: |
+          *.log
+          logs/
+        retention-days: 7
