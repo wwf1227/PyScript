@@ -27,13 +27,13 @@ class FeishuSheetOperator:
             end: 结束行号
         """
         # 在实际使用时，需要替换为有效的飞书API凭证
-        self.APP_ID = "cli_a8626aa5e47e101c"
-        self.APP_SECRET = "14AXuQE5vqK4Z75FOBVvzcJaUCtTVCR5"
+        self.APP_ID = "cli_a9be44c67238dbc6"
+        self.APP_SECRET = "ZJtXV2OVBGPJ1pmQCBF9Me1CsgSeyMqh"
         self.TOKEN_CACHE_FILE = "data/feishu_token_cache.json"
         self.headers = {}
         self.base_url = "https://open.feishu.cn"
         # 读取列
-        self.read_column = "A"
+        self.read_column = "F"
         # 写入列
         self.write_column = "B"
 
@@ -41,8 +41,8 @@ class FeishuSheetOperator:
         self.start_row = start
         self.end_row = end
         # 目标表格和工作表
-        self.table_name = "MpdWs2EGshjQXbtJKrccT6xbnOb"
-        self.sheet_name = "wlmPUI"
+        self.table_name = "GfcUsbunHhotyJteMorcJZJbnye"
+        self.sheet_name = "4c55b7"
         
         # 统计信息
         self.success_count = 0

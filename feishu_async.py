@@ -29,8 +29,8 @@ class FeishuSheetOperatorAsyncV2:
         self.base_url = "https://open.feishu.cn"
         self.start_row = start
         self.end_row = end
-        self.table_name = "MpdWs2EGshjQXbtJKrccT6xbnOb"
-        self.sheet_name = "wlmPUI"
+        self.table_name = "GfcUsbunHhotyJteMorcJZJbnye"
+        self.sheet_name = "4c55b7"
         self.max_concurrent = max_concurrent
         self.token = None
         
