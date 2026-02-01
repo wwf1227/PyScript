@@ -9,6 +9,14 @@ on:
         description: 'Python 文件路径(相对于项目根目录)'
         required: true
         default: 'feishu_sync_optimized.py'
+      start_line:
+        description: '开始行'
+        required: true
+        default: '2'
+      end_line:
+        description: '结束行'
+        required: true
+        default: '1000'
   
   # 推送到主分支时触发
   # push:
@@ -61,7 +69,7 @@ jobs:
         
         # 执行脚本并将输出保存到日志文件（同时在控制台显示）
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          python "${{ github.event.inputs.python_file }}" 2>&1 | tee "$LOG_FILE"
+          python "${{ github.event.inputs.python_file }}" ${{ github.event.inputs.start_line }} ${{ github.event.inputs.end_line }} 2>&1 | tee "$LOG_FILE"
         else
           python feishu_sync_optimized.py 2>&1 | tee "$LOG_FILE"  # 修改为你的默认 Python 文件路径
         fi

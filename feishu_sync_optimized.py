@@ -5,6 +5,7 @@
 @Author : wwf
 Description: 优化版飞书表格图片处理工具（同步版本）
 """
+import sys
 import base64
 import json
 import os
@@ -35,7 +36,7 @@ class FeishuSheetOperator:
         # 读取列
         self.read_column = "F"
         # 写入列
-        self.write_column = "B"
+        self.write_column = "G"
 
         # 行范围
         self.start_row = start
@@ -383,11 +384,17 @@ class FeishuSheetOperator:
 
 
 if __name__ == "__main__":
-    start = 2
-    end = 202
+    if len(sys.argv) >= 3:
+        start_line = int(sys.argv[1])
+        end_line = int(sys.argv[2])
+    else:
+        start_line = 2
+        end_line = 1000
+    
+    print(f"处理从第 {start_line} 行到第 {end_line} 行")
     
     try:
-        operator = FeishuSheetOperator(start, end)
+        operator = FeishuSheetOperator(start_line, end_line)
         operator.run()
     except KeyboardInterrupt:
         print("\n\n⚠️  程序被用户中断")
