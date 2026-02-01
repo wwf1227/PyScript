@@ -293,21 +293,21 @@ class FeishuSheetOperator:
             是否处理成功
         """
         # 下载图片
-        print(f"  📥 下载图片: {image_url[:60]}...")
+        # print(f"  📥 下载图片: {image_url[:60]}...")
         image_data = self.download_image(image_url)
         
         if not image_data:
             print(f"  ❌ 图片下载失败")
             return False
         
-        print(f"  ✅ 下载成功 ({len(image_data)} bytes)")
+        # print(f"  ✅ 下载成功 ({len(image_data)} bytes)")
         
         # 上传图片
-        print(f"  📤 上传到 {cell_range}...")
+        # print(f"  📤 上传到 {cell_range}...")
         success = self.upload_image(image_data, cell_range)
         
         if success:
-            print(f"  ✅ 上传成功")
+            # print(f"  ✅ 上传成功")
             return True
         else:
             print(f"  ❌ 上传失败")
@@ -333,7 +333,7 @@ class FeishuSheetOperator:
         # 逐行处理
         for idx, r in enumerate(res):
             row_index = idx + self.start_row
-            print(f"\n[{idx + 1}/{len(res)}] 处理行 {row_index}:")
+            # print(f"\n[{idx + 1}/{len(res)}] 处理行 {row_index}:")
             
             # 检查是否有图片URL
             if not r or not r[0] or "http" not in r[0]:
