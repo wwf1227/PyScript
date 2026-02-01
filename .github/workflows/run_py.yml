@@ -53,11 +53,17 @@ jobs:
     # 执行 Python 脚本
     - name: Run Python script
       run: |
-        # 如果是手动触发，使用输入的文件路径；否则使用默认路径
+        # 创建日志目录
+        mkdir -p logs
+        
+        # 生成日志文件名（包含时间戳）
+        LOG_FILE="logs/execution_$(date +%Y%m%d_%H%M%S).log"
+        
+        # 执行脚本并将输出保存到日志文件（同时在控制台显示）
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          python "${{ github.event.inputs.python_file }}"
+          python "${{ github.event.inputs.python_file }}" 2>&1 | tee "$LOG_FILE"
         else
-          python main.py  # 修改为你的默认 Python 文件路径
+          python feishu_sync_optimized.py 2>&1 | tee "$LOG_FILE"  # 修改为你的默认 Python 文件路径
         fi
       env:
         # 可以在这里添加环境变量
