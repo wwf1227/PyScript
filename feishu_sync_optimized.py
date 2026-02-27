@@ -133,6 +133,9 @@ class FeishuSheetOperator:
     def sheet_value(self) -> Optional[List]:
         """获取表格数据"""
         try:
+            if self.start_row < 2:
+                raise Exception("start_row 必须大于等于 2")
+
             print(f"📊 正在获取表格数据 (行 {self.start_row}-{self.end_row})...")
             
             params = {
@@ -163,6 +166,12 @@ class FeishuSheetOperator:
             print(f"❌ 获取表格数据异常: {e}")
             return None
 
+    def is_image_response(self, response: requests.Response) -> bool:
+        """根据响应头判断是否为图片"""
+        content_type = response.headers.get('content-type', '')
+        mime = content_type.split(';')[0].strip()
+        return mime.startswith('image/')
+
     def download_image(self, image_url: str, max_retries: int = 3) -> Optional[bytes]:
         """
         下载图片（带重试和超时控制）
@@ -192,6 +201,12 @@ class FeishuSheetOperator:
                     allow_redirects=True
                 )
                 
+                # 检查响应是否为图片
+                if response.status_code == 200 and not self.is_image_response(response):
+                    # 成功响应但不是图片，可能是 URL 本身不是图片，直接终止
+                    print(f"⚠️  URL 不是图片 : {image_url}")
+                    return None
+
                 if response.status_code == 200:
                     return response.content
                 elif response.status_code == 403:
@@ -216,6 +231,7 @@ class FeishuSheetOperator:
             except requests.RequestException as e:
                 print(f"⚠️  图片下载异常 (尝试 {attempt + 1}/{max_retries}): {str(e)[:50]}")
             except Exception as e:
+                print(e)
                 print(f"⚠️  未知错误 (尝试 {attempt + 1}/{max_retries}): {str(e)[:50]}")
             
             # 重试前等待，使用指数退避
@@ -334,11 +350,11 @@ class FeishuSheetOperator:
         # 逐行处理
         for idx, r in enumerate(res):
             row_index = idx + self.start_row
-            # print(f"\n[{idx + 1}/{len(res)}] 处理行 {row_index}:")
+            print(f"\n[{idx + 1}/{len(res)}] 处理行 {row_index}:")
             
             # 检查是否有图片URL
             if not r or not r[0] or "http" not in r[0]:
-                print(f"  ⏭️  跳过 (无图片URL)")
+                # print(f"  ⏭️  跳过 (无图片URL)")
                 self.skip_count += 1
                 continue
             
