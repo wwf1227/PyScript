@@ -111,7 +111,7 @@ async def reporter_loop():
             connector=aiohttp.TCPConnector(ssl=False),
             trust_env=False,
         ) as session,
-        aiosqlite.connect(DB_PATH) as db,
+        aiosqlite.connect(DB_PATH, timeout=30) as db,
     ):
         await init_db(db)
 

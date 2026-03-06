@@ -48,7 +48,7 @@ async def _db_writer():
     buffer: list[dict] = []
     last_flush = time.monotonic()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
         await init_db(db)
 
         while True:
