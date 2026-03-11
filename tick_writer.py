@@ -1,105 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-tick_writer.py
-进程一：接收掘金量化 Tick 回调，批量写入 SQLite 数据库
-"""
 
-import asyncio
-import os
 import signal
+import socket
 import threading
 import logging
 import time
+import json
 
 import aiosqlite
+import asyncio
 
 from gm.api import *
 from db_utils import DB_PATH, init_db, insert_ticks
 
-# ================= 配置 =================
-
-BATCH_SIZE     = 1    # 积累多少条触发写库
-FLUSH_INTERVAL = 3     # 最长多少秒强制刷盘
-QUEUE_MAXSIZE  = 5000  # 内存队列上限，防止 OOM
+QUEUE_MAXSIZE  = 5000
+REPORTER_PORT  = 19999
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [Writer] %(levelname)s %(message)s",
 )
 
-# ================= 全局状态 =================
-
 _tick_queue: asyncio.Queue | None = None
 _shutdown_event: asyncio.Event | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _bg_thread: threading.Thread | None = None
+_sock: socket.socket | None = None
 
-
-# ================= 异步写入消费者 =================
 
 async def _db_writer():
-    """
-    从队列消费 tick，按 BATCH_SIZE 或 FLUSH_INTERVAL 批量写入数据库。
-    不做 HTTP 上报，专注持久化。
-    """
     global _tick_queue, _shutdown_event
-
-    buffer: list[dict] = []
-    last_flush = time.monotonic()
 
     async with aiosqlite.connect(DB_PATH, timeout=30) as db:
         await init_db(db)
 
         while True:
-            # ---- 从队列取数据，最多等 1 秒 ----
             try:
                 tick = await asyncio.wait_for(_tick_queue.get(), timeout=1.0)
-                buffer.append(tick)
                 _tick_queue.task_done()
+                await insert_ticks(db, [tick])
             except asyncio.TimeoutError:
-                pass  # 超时正常，继续检查刷盘条件
+                pass
 
-            # ---- 批量刷盘 ----
-            now = time.monotonic()
-            should_flush = len(buffer) >= BATCH_SIZE or (
-                buffer and now - last_flush >= FLUSH_INTERVAL
-            )
-            if should_flush:
-                await insert_ticks(db, buffer)
-                buffer.clear()
-                last_flush = now
-
-            # ---- 退出条件：shutdown 已触发且队列已清空 ----
             if _shutdown_event.is_set() and _tick_queue.empty():
                 break
 
-        # ---- 优雅退出：处理最后剩余数据 ----
-        remaining: list[dict] = []
-        while not _tick_queue.empty():
-            remaining.append(_tick_queue.get_nowait())
-            _tick_queue.task_done()
+    logging.info("_db_writer 安全退出")
 
-        if buffer or remaining:
-            await insert_ticks(db, buffer + remaining)
-
-        logging.info("_db_writer 安全退出，刷盘剩余 %d 条", len(buffer) + len(remaining))
-
-
-# ================= 后台事件循环线程 =================
 
 async def _async_main():
     global _tick_queue, _shutdown_event
-
     _tick_queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
     _shutdown_event = asyncio.Event()
-
     try:
         await _db_writer()
     except Exception:
         logging.exception("_db_writer 意外崩溃")
-    finally:
-        logging.info("Writer 异步服务已关闭")
 
 
 def _run_event_loop():
@@ -112,16 +69,13 @@ def _run_event_loop():
         _loop.close()
 
 
-# ================= 安全退出 =================
-
 def _trigger_shutdown():
-    """线程安全地通知消费者退出"""
     if _loop and _shutdown_event:
         _loop.call_soon_threadsafe(_shutdown_event.set)
 
 
 def _signal_handler(signum, frame):
-    logging.info("收到退出信号 (%s)，开始优雅关闭...", signum)
+    logging.info("收到退出信号，开始优雅关闭...")
     _trigger_shutdown()
 
 
@@ -129,13 +83,11 @@ signal.signal(signal.SIGINT, _signal_handler)
 if hasattr(signal, "SIGTERM"):
     signal.signal(signal.SIGTERM, _signal_handler)
 
-
-# ================= 启动后台线程 =================
+_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 _bg_thread = threading.Thread(target=_run_event_loop, name="WriterLoop", daemon=False)
 _bg_thread.start()
 
-# 等待队列和事件就绪（最多 5 秒）
 for _ in range(50):
     if _tick_queue is not None:
         break
@@ -145,8 +97,6 @@ else:
 
 logging.info("Writer 后台线程已就绪")
 
-
-# ================= 掘金策略回调 =================
 
 def init(context):
     subscribe(symbols="SHSE.000001", frequency="tick", wait_group=True)
@@ -168,14 +118,21 @@ def on_tick(context, tick):
         "last_amount":  float(tick["last_amount"]),
         "created_at":   str(tick["created_at"]),
     }
+
+    # ✅ 直接发给 Reporter，不经过数据库
     try:
-        # call_soon_threadsafe + put_nowait 是跨线程投递的正确姿势
+        data = json.dumps(tick_data).encode("utf-8")
+        _sock.sendto(data, ("127.0.0.1", REPORTER_PORT))
+        logging.info("已发送 tick 到 Reporter: %s price=%s", tick_data["created_at"], tick_data["price"])
+    except Exception as e:
+        logging.warning("发送失败: %s", e)
+
+    # 数据库只做备份
+    try:
         _loop.call_soon_threadsafe(_tick_queue.put_nowait, tick_data)
     except asyncio.QueueFull:
-        logging.warning("队列已满，丢弃 tick: %s", tick_data["symbol"])
+        logging.warning("队列已满，丢弃备份")
 
-
-# ================= 主线程：运行掘金策略 =================
 
 try:
     run(
@@ -194,9 +151,7 @@ try:
 except KeyboardInterrupt:
     logging.info("run() 收到 KeyboardInterrupt")
 finally:
-    logging.info("等待后台写入线程退出（最多 15 秒）...")
     _trigger_shutdown()
     _bg_thread.join(timeout=15)
-    if _bg_thread.is_alive():
-        logging.warning("后台线程超时未退出，强制结束")
+    _sock.close()
     logging.info("Writer 进程已安全退出")
