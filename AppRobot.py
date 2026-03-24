@@ -319,7 +319,7 @@ class AdbCommand:
                 )
                 # 随机等待，每个设备独立
                 rand_sleep = rng.randint(10, 30) / 10
-                print(f"设备 {device_id} 随机等待 {rand_sleep} 秒")
+                # print(f"设备 {device_id} 随机等待 {rand_sleep} 秒")
                 await asyncio.sleep(rand_sleep)
 
     async def ks_swip_async(self):

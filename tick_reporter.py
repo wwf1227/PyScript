@@ -9,7 +9,7 @@ import logging
 import json
 import requests
 
-REPORT_URL = "https://appalpha1.tingyun.com/appdatasvr/finbench/v1/data/standard"
+REPORT_URL = "https://wkadt1.tingyun.com/appdatasvr/finbench/v1/data/standard"
 LISTEN_PORT = 19999
 
 logging.basicConfig(

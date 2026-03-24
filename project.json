@@ -1,0 +1,23 @@
+{
+    "id": 8548,
+    "scriptText": "\nwith(task.add({title:`启动到首页`,keyStep:true,must:true,timeout:20000})){action=async function(){\n                                            el = await waitTextList(['全部','转账','更多','我的','信用卡','理财','生活'],{expr:\"A&&B||A&&D||A&&E||A&&F||C&&D||C&&E||C&&F||D&&E||D&&F||E&&F\",\"matchMode\":2});\n\n                                          }\n                                           await execute()\n                                          }\nwith(task.add({title:`monkey-1s`,keyStep:true,must:true,timeout:20000})){action=async function(){\n                                            el = await getAllTexts();\narr = el.slice(-5);\nfor (let i = 0; i < 6; i++) {\n  const element = arr[i % 5]\n  await log(element.result)\n  await driver.abdInputTap(element.result[0],element.result[1]);\n  await sleep(10*1000);\n}\n\n\n                                          }\n                                           await execute()\n                                          }",
+    "formalIndex": null,
+    "steps": [
+        {
+            "text": "\nwith(task.add({title:`启动到首页`,keyStep:true,must:true,timeout:20000})){action=async function(){\n                                            el = await waitTextList(['全部','转账','更多','我的','信用卡','理财','生活'],{expr:\"A&&B||A&&D||A&&E||A&&F||C&&D||C&&E||C&&F||D&&E||D&&F||E&&F\",\"matchMode\":2});\n\n                                          }\n                                           await execute()\n                                          }",
+            "name": "启动到首页",
+            "stepIndex": 0,
+            "keyStep": true
+        },
+        {
+            "text": "\nwith(task.add({title:`monkey-1s`,keyStep:true,must:true,timeout:20000})){action=async function(){\n                                            el = await getAllTexts();\narr = el.slice(-5);\nfor (let i = 0; i < 6; i++) {\n  const element = arr[i % 5]\n  await log(element.result)\n  await driver.abdInputTap(element.result[0],element.result[1]);\n  await sleep(10*1000);\n}\n\n\n                                          }\n                                           await execute()\n                                          }",
+            "name": "monkey-1s",
+            "stepIndex": 1,
+            "keyStep": true
+        }
+    ],
+    "md5List": [],
+    "recorderVer": 2,
+    "stepExtra": [],
+    "scriptFile": "{\"deviceLogs\": [], \"version\": 2, \"stepExtra\": [], \"scriptId\": 8548, \"scriptName\": \"CAFA-泸州银行-Android\", \"appID\": 17964, \"stepList\": [{\"userScript\": \"el = $waitTextList(['全部','转账','更多','我的','信用卡','理财','生活'],{expr:\\\"A&&B||A&&D||A&&E||A&&F||C&&D||C&&E||C&&F||D&&E||D&&F||E&&F\\\",\\\"matchMode\\\":2});\", \"userImportScript\": \"\", \"actionID\": 1763002649216, \"mode\": 1, \"stepName\": \"启动到首页\", \"stepSetting\": {\"isMust\": true, \"timeout\": 20000}, \"active\": false}, {\"label\": \"\", \"userScript\": \"el = $getAllTexts();\\narr = el.slice(-5);\\nfor (let i = 0; i < 6; i++) {\\n  const element = arr[i % 5]\\n  $log(element.result)\\n  await driver.abdInputTap(element.result[0],element.result[1]);\\n  $sleep(10*1000);\\n}\\n\", \"actionID\": 1763004275626, \"mode\": 1, \"stepName\": \"monkey-1s\", \"stepSetting\": {\"isMust\": true, \"timeout\": 20000}, \"active\": true}]}"
+}
