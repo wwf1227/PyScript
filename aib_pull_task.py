@@ -7,8 +7,8 @@ import requests
 from json_to_excel_incremental import append_to_excel
 from parser_utils import LogParser
 
-beginTime = "2026-03-20 15:20:00"
-endTime = "2026-03-20 15:40:00"
+beginTime = "2026-03-26 10:00:00"
+endTime = "2026-03-26 13:00:00"
 
 
 class AibTaskLog:
@@ -76,7 +76,6 @@ class AibTaskLog:
             return None
 
     def main(self, taskId):
-        file_path = "aggregated_results.xlsx"
         self.taskId = taskId
         try:
             datas = self.dump_task_data(task_id=taskId)
@@ -115,6 +114,15 @@ class AibTaskLog:
                 if len(all_log_json) < 1:
                     print(f"-----第{index+1}条，没有日志，data:{data}")
                     continue
+                
+                # 从日志中查找指定链接
+                # found = LogParser.contains_url_in_json_list(
+                #     all_log_json,
+                #     "https://www.doubao.com/thread/aeaee091b5aec"
+                # )
+                # if found:
+                #     print(f"taskUID: {taskUID},st: {st}")
+                #     exit(0)
 
                 aggregated_results = LogParser.aggregate_from_json_list(all_log_json)
                 # print(aggregated_results)
@@ -138,10 +146,10 @@ if __name__ == "__main__":
 
     # print(AibTask().dump_task_data(8986))
     cookies = {
-        "JSESSIONID": "1BEF6A39883F5E98E83F1041F07B908C",
+        "JSESSIONID": "58C289458FDF013A2C7730D80920C97E",
         "wk_appopsweb_uid": "d25fcb95f991e19654fb48eacd9228d3881b01da",
         "wk_uid": "5bdecd96985cc7c3d90c639b8c7b4f79171699b0",
-        "CASTGC": "TGT-256288-de5BI5mOu61LTg5U5zgFBKGRt9nffSzf9EEUEIrfdHzaUowpIf-account.tingyun.com"
+        "CASTGC": "TGT-288034-jhqfunuuAw1eF3J76T4BFz1Bcsnz7pkW7INlgbMfjBxhod6lYJ-account.tingyun.com"
     }
     AibTaskLog(cookie=cookies).main(9391)
     # AibTaskLog(cookie=cookies).main(9406)

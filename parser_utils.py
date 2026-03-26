@@ -158,6 +158,22 @@ class LogParser:
             "answers": all_answers,
             "count": len(all_answers)
         }
+    
+    @classmethod
+    def contains_url_in_json_list(
+        cls,
+        data_list: List[List[Dict]],
+        target_url: str
+    ) -> bool:
+        """
+        检测多个JSON日志中是否包含指定URL
+        """
+        for data in data_list:
+            result = cls.extract_from_json(data)
+            if target_url in result["answers"]:
+                return True
+        return False
+    
 # ⭐ 测试入口（可删）
 if __name__ == "__main__":
 

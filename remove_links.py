@@ -60,13 +60,13 @@ def check_urls(urls, keyword):
     hit = []
 
     for i, u in enumerate(urls, 1):
-        print(f"检测({i}/{len(urls)}):", u)
+        # print(f"检测({i}/{len(urls)}):", u)
 
         if page_contains_keyword(u, keyword):
-            print("  ✅ 命中")
+            print("  ✅ 命中",u)
             hit.append(u)
         else:
-            print("  ❌ 未命中")
+            print("  ❌ 未命中: ",u)
 
     return hit
 
@@ -74,13 +74,27 @@ def check_urls(urls, keyword):
 if __name__ == "__main__":
 
     text = """
-题为：换季皮肤过敏，哪些修护面霜品牌比较好？
-2026-03-20 07:59:04: 第1遍结果:https://www.doubao.com/thread/a1992bd6104fb
-2026-03-20 07:59:04: 第2遍结果:https://www.doubao.com/thread/a7b9566a0c52a
-2026-03-20 07:59:04: 第3遍结果:https://www.doubao.com/thread/a65ea942d8619
-2026-03-20 07:59:04: 第4遍结果:https://www.doubao.com/thread/abf5a80adc3cb
-2026-03-20 07:59:04: 第5遍结果:https://www.doubao.com/thread/aa39600a7e971
-2026-03-20 07:59:04: 等待：4000
+https://www.doubao.com/thread/a98276ce408dc
+https://www.doubao.com/thread/a788b553bffe4
+https://www.doubao.com/thread/a322b0fe59c35
+https://www.doubao.com/thread/a9a144cb83e8f
+https://www.doubao.com/thread/a308f2c549a87
+https://www.doubao.com/thread/adc4d23c5ba70
+https://www.doubao.com/thread/a3adb85e65193
+https://www.doubao.com/thread/ac54b73919a88
+https://www.doubao.com/thread/a740f880477d6
+https://www.doubao.com/thread/a5889d22dbffc
+https://www.doubao.com/thread/a91455fc3c608
+https://www.doubao.com/thread/a48a98458ae04
+https://www.doubao.com/thread/a4e548c8cad00
+https://www.doubao.com/thread/a169d2733cac5
+https://www.doubao.com/thread/a34e2af2b3c8e
+https://www.doubao.com/thread/aa77b72ad77cb
+https://www.doubao.com/thread/a37f7a77a2166
+https://www.doubao.com/thread/a925cafa15c68
+https://www.doubao.com/thread/ab25cd9743853
+https://www.doubao.com/thread/a54815d2810f1
+https://www.doubao.com/thread/a0f0bd4491cdd
     """
 
     urls = extract_urls(text)
