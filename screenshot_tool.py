@@ -164,16 +164,23 @@ async def take_screenshot(
             await browser.close()
             raise ValueError(f"未找到元素: {selector}")
 
-        target_h = int(element_info['bottom'])
+        target_bottom_y = element_info['bottom']  # 页面坐标系，元素底部距顶部距离
         page_w = element_info['width']
-        scale = viewport_width / page_w if page_w else 1.0
 
-        # ✅ 直接截取 clip 区域，不截全屏再裁剪
-        clip_h = min(int(target_h * scale), 32767)  # Pillow 单边上限
-        screenshot_bytes = await page.screenshot(
-            clip={'x': 0, 'y': 0, 'width': viewport_width, 'height': clip_h}
-        )
+        # 截完整长页面（full_page=True 才能覆盖视口以外的区域）
+        screenshot_bytes = await page.screenshot(full_page=True)
         await browser.close()
+
+    # 裁剪：从顶部截到元素底部
+    # full_page 图片宽度 = 实际渲染宽度，需换算缩放比
+    img = Image.open(io.BytesIO(screenshot_bytes))
+    scale = img.width / page_w if page_w else 1.0
+    crop_h = int(target_bottom_y * scale)
+    cropped = img.crop((0, 0, img.width, min(crop_h, img.height)))
+
+    out = io.BytesIO()
+    cropped.save(out, format='PNG')
+    screenshot_bytes = out.getvalue()
 
     if add_watermark:
         screenshot_bytes = add_date_watermark(screenshot_bytes, position='top-right')
