@@ -11,6 +11,18 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
+
+# ── 自定义异常 ─────────────────────────────────────────────────────────────
+
+class PageNotFoundError(Exception):
+    """页面内容不存在（如头条「抱歉，你访问的内容不存在」），应写入错误原因到表格"""
+    pass
+
+class PageBlockedError(Exception):
+    """页面被反爬拦截或重定向到登录页"""
+    pass
+
+
 # ── 字体（兼容 macOS / Windows / Linux） ──────────────────────────────────
 _FONT_CANDIDATES = [
     "/System/Library/Fonts/PingFang.ttc",
@@ -133,24 +145,47 @@ def add_date_watermark(image_bytes: bytes, position: str = 'top-right') -> bytes
 # ── 内部工具 ──────────────────────────────────────────────────────────────
 
 async def _check_blocked(page: Page) -> Optional[str]:
-    """检测页面是否被反爬拦截，返回原因字符串或 None"""
+    """
+    检测页面异常状态：
+      - 内容不存在 → 抛出 PageNotFoundError（调用方应写入错误原因到表格）
+      - 反爬/登录重定向 → 抛出 PageBlockedError
+      - 正常 → 返回 None
+    """
     try:
-        # 重定向到登录页（图1的场景）
-        if "sso.toutiao.com" in page.url or "/login" in page.url:
-            return f"被重定向到登录页: {page.url}"
+        current_url = page.url
+
+        # 重定向到登录页
+        if "sso.toutiao.com" in current_url or "/login" in current_url:
+            raise PageBlockedError(f"被重定向到登录页: {current_url}")
 
         title = await page.title()
         body_text = (await page.evaluate("document.body.innerText || ''")).lower()
 
+        # ── 内容不存在检测（优先级最高，应写入表格而非重试）──
+        NOT_FOUND_SIGNALS = [
+            "你访问的内容不存在",
+            "内容不存在",
+            "页面不存在",
+            "该内容已被删除",
+            "内容已下线",
+            "404",
+        ]
+        for signal in NOT_FOUND_SIGNALS:
+            if signal in body_text or signal in title.lower():
+                raise PageNotFoundError(f"内容不存在（匹配: '{signal}'）")
+
+        # ── 反爬拦截检测 ──
         for signal in _BLOCK_SIGNALS:
             if signal in body_text or signal in title.lower():
-                return f"含拦截信号 '{signal}'（title={title!r}）"
+                raise PageBlockedError(f"含拦截信号 '{signal}'（title={title!r}）")
 
         if len(body_text.strip()) < 100:
-            return f"内容过短（{len(body_text.strip())} 字），疑似拦截（title={title!r}）"
+            raise PageBlockedError(f"内容过短（{len(body_text.strip())} 字），疑似拦截（title={title!r}）")
 
+    except (PageNotFoundError, PageBlockedError):
+        raise   # 直接向上传递，不吞掉
     except Exception as e:
-        logger.debug(f"反爬检测异常（忽略）: {e}")
+        logger.debug(f"页面状态检测异常（忽略）: {e}")
     return None
 
 
@@ -285,12 +320,14 @@ async def take_screenshot(
 
         await page.wait_for_timeout(2000)
 
-        # 2. 反爬 / 登录重定向检测（快速失败，不傻等 selector）
-        block_reason = await _check_blocked(page)
-        if block_reason:
+        # 2. 页面状态检测：内容不存在 → PageNotFoundError，反爬 → PageBlockedError
+        #    两种异常都向上传递，让调用方决定如何处理（写表格 or 重试 or 跳过）
+        try:
+            await _check_blocked(page)
+        except (PageNotFoundError, PageBlockedError):
             await _dump_debug(page, "debug_blocked.png")
             await browser.close()
-            raise RuntimeError(f"页面被拦截 [{url}]: {block_reason}")
+            raise   # 直接向上抛，不包装
 
         # 3. 分段慢速滚动到底部，确保触发评论区懒加载
         # 今日头条评论区在滚动到文章末尾后才渲染，一次性跳到底部可能跳过懒加载触发点

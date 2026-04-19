@@ -27,7 +27,11 @@ from typing import Optional
 
 import aiohttp
 
-from screenshot_tool import take_screenshot, take_toutiao_screenshot, TOUTIAO_COMMENT_AREA_SELECTORS
+from screenshot_tool import (
+    take_screenshot, take_toutiao_screenshot,
+    TOUTIAO_COMMENT_AREA_SELECTORS,
+    PageNotFoundError, PageBlockedError,
+)
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -60,6 +64,7 @@ class Result:
     task: Task
     image_bytes: Optional[bytes] = None
     error: Optional[str] = None
+    not_found: bool = False     # True 表示内容不存在，应写入错误原因到表格
 
     @property
     def ok(self) -> bool:
@@ -71,13 +76,15 @@ class Stats:
     success: int = 0
     failed: int = 0
     skipped: int = 0
+    not_found: int = 0          # 内容不存在，已将原因写入表格
     errors: list = field(default_factory=list)
 
     def report(self, total: int, duration: float) -> str:
         lines = [
             "=" * 60,
             f"✨ 处理完成！",
-            f"📊 总计: {total} 行  ✅ 成功: {self.success}  ❌ 失败: {self.failed}  ⏭️  跳过: {self.skipped}",
+            f"📊 总计: {total} 行  ✅ 成功: {self.success}  ❌ 失败: {self.failed}  "
+            f"🚫 不存在: {self.not_found}  ⏭️  跳过: {self.skipped}",
             f"⏱️  耗时: {duration:.1f}s  🚀 均速: {total / duration:.2f} 行/s",
         ]
         if self.errors:
@@ -266,10 +273,36 @@ class FeishuSheet:
 
         return False
 
-
-# ---------------------------------------------------------------------------
-# 图片获取（截图 or 直接下载）
-# ---------------------------------------------------------------------------
+    async def write_text(
+        self,
+        session: aiohttp.ClientSession,
+        token: str,
+        text: str,
+        row: int,
+    ) -> bool:
+        """将文本写入指定行单元格（用于记录错误原因）"""
+        url = (
+            f"{self.base_url}/open-apis/sheets/v2/spreadsheets"
+            f"/{self.table_name}/values"
+        )
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        payload = {
+            "valueRange": {
+                "range": f"{self.sheet_name}!{self.cell_range(row)}",
+                "values": [[text]],
+            }
+        }
+        try:
+            async with session.put(
+                url, headers=headers, json=payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                resp.raise_for_status()
+                body = await resp.json()
+                return body.get("code") == 0
+        except Exception as e:
+            logger.warning(f"写入文本失败 行{row}: {e}")
+            return False
 
 async def fetch_image(
     task: Task,
@@ -283,15 +316,18 @@ async def fetch_image(
     """
     if task.is_screenshot:
         async with screenshot_sem:
-            # 随机延迟，模拟人工行为，降低反爬识别概率
             await asyncio.sleep(random.uniform(1.0, 3.0))
             try:
-                # 今日头条走专用函数：无 cookie + 点击评论触发按钮 + 多候选 selector
                 if "toutiao.com" in task.url:
                     img = await take_toutiao_screenshot(task.url, include_comments=True)
                 else:
                     img = await take_screenshot(task.url, COMMENT_SELECTOR)
                 return Result(task=task, image_bytes=img)
+            except PageNotFoundError as e:
+                # 内容不存在，需要写入错误原因到表格，not_found=True 标记
+                return Result(task=task, error=str(e), not_found=True)
+            except PageBlockedError as e:
+                return Result(task=task, error=f"页面被拦截: {e}")
             except Exception as e:
                 return Result(task=task, error=f"截图失败: {e}")
     else:
@@ -398,17 +434,21 @@ class FeishuPipeline:
         start_row: int = 1,
         end_row: int = 100,
         screenshot_concurrency: int = 2,
-        upload_concurrency: int = 5,
+        download_concurrency: int = 5,   # 重命名：仅控制图片下载并发
     ):
         self.token_mgr = FeishuToken(app_id, app_secret)
         self.sheet = FeishuSheet(table_name, sheet_name, read_column, write_column)
         self.start_row = start_row
         self.end_row = end_row
 
-        self.upload_concurrency = upload_concurrency
         self.screenshot_sem = asyncio.Semaphore(screenshot_concurrency)
-        self.download_sem = asyncio.Semaphore(upload_concurrency)
-        self.upload_sem = asyncio.Semaphore(upload_concurrency)
+        self.download_sem = asyncio.Semaphore(download_concurrency)
+
+        # 飞书写入接口有频率限制，强制串行（同一时刻只有一个写入请求）
+        self.write_sem = asyncio.Semaphore(1)
+
+        # queue_maxsize 用下载并发数作为缓冲参考
+        self._queue_maxsize = download_concurrency * 2
 
         self.stats = Stats()
 
@@ -437,16 +477,14 @@ class FeishuPipeline:
                 return
 
             # 4. 启动流水线
-            queue_maxsize = self.upload_concurrency * 2  # 队列缓冲略大于上传并发数
-            upload_queue: asyncio.Queue[Optional[Result]] = asyncio.Queue(maxsize=queue_maxsize)
+            upload_queue: asyncio.Queue[Optional[Result]] = asyncio.Queue(maxsize=self._queue_maxsize)
 
-            # 启动上传消费者
+            # 飞书写入串行：只启动 1 个 worker，从根本上避免并发写入
             upload_workers = [
                 asyncio.create_task(
                     self._upload_worker(session, token, upload_queue),
-                    name=f"upload-{i}",
+                    name="upload-0",
                 )
-                for i in range(min(5, len(tasks)))
             ]
 
             # 生产者：并发 fetch，结果推入 upload_queue
@@ -500,32 +538,45 @@ class FeishuPipeline:
                 queue.task_done()
                 break
 
-            if not result.ok:
-                self.stats.failed += 1
-                self.stats.errors.append(f"行{result.task.row_index} {result.error}")
-                logger.error(f"❌ 行 {result.task.row_index} 获取图片失败: {result.error}")
-                queue.task_done()
-                continue
+            # 每次操作前确保 token 有效
+            try:
+                current_token = await self.token_mgr.get(session)
+            except Exception as e:
+                logger.error(f"Token 刷新失败: {e}")
+                current_token = token
 
-            async with self.upload_sem:
-                # Token 可能在长时间运行后过期，每次上传前检查
-                try:
-                    current_token = await self.token_mgr.get(session)
-                except Exception as e:
-                    logger.error(f"Token 刷新失败: {e}")
-                    current_token = token  # 降级使用旧 token
+            async with self.write_sem:
+                if result.not_found:
+                    # 内容不存在：把原因写入对应单元格，不算失败
+                    written = await self.sheet.write_text(
+                        session, current_token,
+                        text=f"内容不存在",
+                        row=result.task.row_index,
+                    )
+                    self.stats.not_found += 1
+                    if written:
+                        logger.warning(f"🚫 行 {result.task.row_index} 内容不存在，已写入单元格")
+                    else:
+                        logger.warning(f"🚫 行 {result.task.row_index} 内容不存在，写入单元格失败")
 
-                success = await self.sheet.upload_image(
-                    session, current_token, result.image_bytes, result.task.row_index
-                )
+                elif not result.ok:
+                    # 其他错误（截图失败、下载失败等）：记录日志，不写表格
+                    self.stats.failed += 1
+                    self.stats.errors.append(f"行{result.task.row_index} {result.error}")
+                    logger.error(f"❌ 行 {result.task.row_index} 获取图片失败: {result.error}")
 
-            if success:
-                self.stats.success += 1
-                logger.info(f"✅ 行 {result.task.row_index} 上传成功")
-            else:
-                self.stats.failed += 1
-                self.stats.errors.append(f"行{result.task.row_index} 上传失败")
-                logger.error(f"❌ 行 {result.task.row_index} 上传失败")
+                else:
+                    # 正常：上传图片
+                    success = await self.sheet.upload_image(
+                        session, current_token, result.image_bytes, result.task.row_index
+                    )
+                    if success:
+                        self.stats.success += 1
+                        logger.info(f"✅ 行 {result.task.row_index} 上传成功")
+                    else:
+                        self.stats.failed += 1
+                        self.stats.errors.append(f"行{result.task.row_index} 上传失败")
+                        logger.error(f"❌ 行 {result.task.row_index} 上传失败")
 
             queue.task_done()
 
@@ -550,8 +601,9 @@ async def main(start: int, end: int):
         write_column="G",
         start_row=start,
         end_row=end,
-        screenshot_concurrency=2,   # 截图慢，控制在 2
-        upload_concurrency=5,        # 上传快，可以放到 5
+        screenshot_concurrency=2,    # 截图：浏览器资源重，控制在 2
+        download_concurrency=5,      # 下载：纯 HTTP，可以放开
+        # 飞书写入固定串行，不可配置
     )
     await pipeline.run()
 
