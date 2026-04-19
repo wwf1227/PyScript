@@ -26,9 +26,8 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
-import aiofiles
 
-from screenshot_tool import take_screenshot
+from screenshot_tool import take_screenshot, take_toutiao_screenshot, TOUTIAO_COMMENT_AREA_SELECTORS
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -284,10 +283,14 @@ async def fetch_image(
     """
     if task.is_screenshot:
         async with screenshot_sem:
-            # 随机延迟，模拟人工行为，减少被反爬识别的概率
+            # 随机延迟，模拟人工行为，降低反爬识别概率
             await asyncio.sleep(random.uniform(1.0, 3.0))
             try:
-                img = await take_screenshot(task.url, COMMENT_SELECTOR)
+                # 今日头条走专用函数：无 cookie + 点击评论触发按钮 + 多候选 selector
+                if "toutiao.com" in task.url:
+                    img = await take_toutiao_screenshot(task.url, include_comments=True)
+                else:
+                    img = await take_screenshot(task.url, COMMENT_SELECTOR)
                 return Result(task=task, image_bytes=img)
             except Exception as e:
                 return Result(task=task, error=f"截图失败: {e}")

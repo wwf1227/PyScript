@@ -4,32 +4,94 @@ import io
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
-# 字体候选路径（按优先级，兼容 macOS / Windows / Linux）
+# ── 字体（兼容 macOS / Windows / Linux） ──────────────────────────────────
 _FONT_CANDIDATES = [
-    "/System/Library/Fonts/PingFang.ttc",           # macOS
-    "/System/Library/Fonts/STHeiti Medium.ttc",     # macOS 备选
-    "C:/Windows/Fonts/msyh.ttc",                    # Windows 微软雅黑
-    "C:/Windows/Fonts/simsun.ttc",                  # Windows 宋体
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", # Linux WQY
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Linux Noto
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 ]
 
-
-def _load_font(size: int = 48) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _load_font(size: int = 48):
     for path in _FONT_CANDIDATES:
         try:
             return ImageFont.truetype(path, size)
         except (IOError, OSError):
             continue
-    logger.warning("未找到中文字体，使用 Pillow 默认字体（中文可能显示为方块）")
+    logger.warning("未找到中文字体，水印中文可能显示为方块")
     return ImageFont.load_default()
 
+
+# ── 反爬检测关键词 ─────────────────────────────────────────────────────────
+_BLOCK_SIGNALS = [
+    "host not in allowlist",
+    "访问被拒绝",
+    "access denied",
+    "403 forbidden",
+    "captcha",
+    "please verify",
+    "robot check",
+    "unusual traffic",
+]
+
+# ── 今日头条 selector 策略 ─────────────────────────────────────────────────
+#
+# 根据截图分析的实际页面结构（无痕/无 cookie 访问）：
+#   - 文章正文渲染完成后，继续向下滚动，评论区自动出现（无需点击）
+#   - 评论区顶部显示「评论 N」标题，下方是「请先登录后发表评论～」
+#   - 左侧「评论」按钮点击只会弹出登录框，不展开评论区
+#   - 目标：截到「评论 N」标题出现的位置即可，这是评论区的顶部锚点
+#
+# 关键结论：
+#   1. 不需要点击任何按钮，滚动到底部评论区自动渲染
+#   2. click_comment_trigger 应设为 False
+#   3. 评论区 selector 找「评论」标题或评论容器顶部
+
+# 评论区顶部标题/容器（滚动到底后自动出现，无需点击）
+TOUTIAO_COMMENT_AREA_SELECTORS = [
+    # 评论数标题，如「评论 0」「评论 163」—— 最可靠的锚点
+    "//h2[contains(text(),'评论')]",              # XPath 文字匹配
+    "//div[contains(@class,'comment') and contains(text(),'评论')]",
+    # 评论区容器
+    "#comment-area",
+    ".comment-area",
+    "[data-e2e='comment-area']",
+    "[data-e2e='comment-list']",
+    "div[class*='CommentArea']",
+    "div[class*='comment-area']",
+    "div[class*='commentArea']",
+    # 登录提示（未登录时评论区底部显示）
+    "//span[contains(text(),'登录后发表评论')]",
+    "//p[contains(text(),'请先')]",
+    # 评论列表容器
+    "div[class*='CommentList']",
+    "div[class*='comment-list']",
+]
+
+# 兜底：只截文章正文末尾（不含评论区）
+TOUTIAO_ARTICLE_END_SELECTORS = [
+    "div[class*='ArticleContent']",
+    "div[class*='article-content']",
+    ".article-content",
+    "[data-e2e='article-content']",
+    "article",
+    ".article",
+    "#article-content",
+    ".content-area",
+    "body",   # 最终保底
+]
+
+
+# ── 水印 ──────────────────────────────────────────────────────────────────
 
 def add_date_watermark(image_bytes: bytes, position: str = 'top-right') -> bytes:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
@@ -39,60 +101,155 @@ def add_date_watermark(image_bytes: bytes, position: str = 'top-right') -> bytes
     now = datetime.now()
     date_text = now.strftime("%Y年%m月%d日")
     time_text = now.strftime("%H:%M:%S")
-
     font = _load_font(48)
 
     date_bbox = draw.textbbox((0, 0), date_text, font=font)
     time_bbox = draw.textbbox((0, 0), time_text, font=font)
-    date_w, date_h = date_bbox[2] - date_bbox[0], date_bbox[3] - date_bbox[1]
-    time_w, time_h = time_bbox[2] - time_bbox[0], time_bbox[3] - time_bbox[1]
+    date_h = date_bbox[3] - date_bbox[1]
+    time_h = time_bbox[3] - time_bbox[1]
+    max_w = max(date_bbox[2] - date_bbox[0], time_bbox[2] - time_bbox[0])
 
-    max_w = max(date_w, time_w)
-    line_spacing = 4
-    pad_h, pad_top, pad_bottom = 16, 14, 24
-    margin = 20
-    total_text_h = date_h + line_spacing + time_h
-
+    line_spacing, pad_h, pad_top, pad_bottom, margin = 4, 16, 14, 24, 20
     box_w = max_w + pad_h * 2
-    box_h = total_text_h + pad_top + pad_bottom
+    box_h = date_h + line_spacing + time_h + pad_top + pad_bottom
 
-    positions = {
+    pos_map = {
         'top-right':    (img.width - box_w - margin, margin),
         'top-left':     (margin, margin),
         'bottom-right': (img.width - box_w - margin, img.height - box_h - margin),
         'bottom-left':  (margin, img.height - box_h - margin),
     }
-    rx, ry = positions.get(position, positions['top-right'])
+    rx, ry = pos_map.get(position, pos_map['top-right'])
 
     draw.rectangle([rx, ry, rx + box_w, ry + box_h], fill=(0, 0, 0, 160))
     draw.text((rx + pad_h, ry + pad_top), date_text, fill=(255, 255, 255, 255), font=font)
     draw.text((rx + pad_h, ry + pad_top + date_h + line_spacing), time_text, fill=(255, 255, 255, 255), font=font)
 
-    composited = Image.alpha_composite(img, overlay).convert("RGB")
     out = io.BytesIO()
-    composited.save(out, format='PNG')
+    Image.alpha_composite(img, overlay).convert("RGB").save(out, format='PNG')
     return out.getvalue()
 
 
+# ── 内部工具 ──────────────────────────────────────────────────────────────
+
+async def _check_blocked(page: Page) -> Optional[str]:
+    """检测页面是否被反爬拦截，返回原因字符串或 None"""
+    try:
+        # 重定向到登录页（图1的场景）
+        if "sso.toutiao.com" in page.url or "/login" in page.url:
+            return f"被重定向到登录页: {page.url}"
+
+        title = await page.title()
+        body_text = (await page.evaluate("document.body.innerText || ''")).lower()
+
+        for signal in _BLOCK_SIGNALS:
+            if signal in body_text or signal in title.lower():
+                return f"含拦截信号 '{signal}'（title={title!r}）"
+
+        if len(body_text.strip()) < 100:
+            return f"内容过短（{len(body_text.strip())} 字），疑似拦截（title={title!r}）"
+
+    except Exception as e:
+        logger.debug(f"反爬检测异常（忽略）: {e}")
+    return None
+
+
+async def _try_click(page: Page, selector: str) -> bool:
+    """尝试点击一个 selector，成功返回 True"""
+    try:
+        if selector.startswith("//"):
+            locator = page.locator(f"xpath={selector}").first
+        else:
+            locator = page.locator(selector).first
+        if await locator.is_visible(timeout=2000):
+            await locator.click(timeout=3000)
+            return True
+    except Exception as e:
+        logger.debug(f"点击 {selector!r} 失败: {e}")
+    return False
+
+
+async def _find_first_selector(
+    page: Page,
+    candidates: list[str],
+    timeout_each: int = 3000,
+) -> Optional[str]:
+    """按顺序尝试 selector，返回第一个命中的"""
+    for sel in candidates:
+        try:
+            locator_str = f"xpath={sel}" if sel.startswith("//") else sel
+            await page.wait_for_selector(locator_str, timeout=timeout_each)
+            logger.info(f"命中 selector: {sel}")
+            return sel
+        except PlaywrightTimeoutError:
+            logger.debug(f"未命中: {sel}")
+    return None
+
+
+async def _get_element_bottom(page: Page, selector: str) -> Optional[dict]:
+    """获取元素底部坐标（页面坐标系）和页面宽度"""
+    js_sel = f"xpath={selector}" if selector.startswith("//") else selector
+    return await page.evaluate('''
+        (sel) => {
+            const el = sel.startsWith("xpath=")
+                ? document.evaluate(sel.slice(6), document, null,
+                    XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+                : document.querySelector(sel);
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {
+                bottom: rect.bottom + window.scrollY,
+                width: document.documentElement.scrollWidth
+            };
+        }
+    ''', js_sel)
+
+
+async def _dump_debug(page: Page, filename: str):
+    """保存调试截图 + 打印 id/class 信息"""
+    try:
+        await page.screenshot(path=filename, full_page=True)
+        ids = await page.evaluate(
+            "[...document.querySelectorAll('[id]')].map(e => e.id).filter(Boolean)"
+        )
+        cls = await page.evaluate('''() => [...new Set(
+            [...document.querySelectorAll("[class]")]
+                .flatMap(e => [...e.classList])
+                .filter(c => /comment|discuss|reply/i.test(c))
+        )]''')
+        logger.warning(f"调试截图已保存: {filename}")
+        logger.warning(f"所有 id: {ids}")
+        logger.warning(f"含 comment/discuss/reply 的 class: {cls}")
+    except Exception:
+        pass
+
+
+# ── 主截图函数 ─────────────────────────────────────────────────────────────
+
 async def take_screenshot(
     url: str,
-    selector: str,
+    selector: str | list[str],
     output_path: str | Path = None,
     add_watermark: bool = True,
     viewport_width: int = 1920,
     viewport_height: int = 1080,
-    goto_timeout: int = 45_000,       # goto 超时（ms）
-    selector_timeout: int = 20_000,   # 等待元素超时（ms）
+    goto_timeout: int = 45_000,
+    selector_timeout: int = 5_000,
+    click_comment_trigger: bool = False,
 ) -> bytes:
     """
     截取指定 URL 从顶部到目标元素底部的长图，返回 PNG 字节数据。
 
-    关键改动：
-    - wait_until 改为 'domcontentloaded'（而非 networkidle），
-      避免新闻/社交类站点因持续心跳请求导致永久等待。
-    - 页面加载后主动等待 selector 出现，若超时抛出清晰异常。
-    - 截图改为直接截取 clip 区域，避免截全屏再裁剪的内存浪费。
+    selector 支持：
+        - 字符串：单个 CSS selector
+        - 列表：多个候选，按顺序尝试，命中第一个
+        - // 开头视为 XPath
+
+    click_comment_trigger：
+        True 时，加载完先点击今日头条评论触发按钮，再等 selector
     """
+    candidates = [selector] if isinstance(selector, str) else list(selector)
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -103,6 +260,8 @@ async def take_screenshot(
                 '--disable-gpu',
             ]
         )
+        # 不设置 storage_state = 无 cookie = 等效无痕模式
+        # 这是今日头条能正常加载的关键（有 cookie 反而会被重定向登录）
         context = await browser.new_context(
             viewport={'width': viewport_width, 'height': viewport_height},
             user_agent=(
@@ -114,65 +273,79 @@ async def take_screenshot(
             timezone_id='Asia/Shanghai',
         )
         page = await context.new_page()
-
-        # 隐藏 webdriver 标志
         await page.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', { get: () => false });"
         )
 
+        # 1. 加载页面
         try:
-            # ✅ 关键修复：用 domcontentloaded 代替 networkidle
-            #    新闻/社交类页面有持续心跳请求，networkidle 永远不会触发
             await page.goto(url, wait_until='domcontentloaded', timeout=goto_timeout)
         except PlaywrightTimeoutError:
-            logger.warning(f"页面加载超时（domcontentloaded），尝试继续: {url}")
-            # 即使 domcontentloaded 超时，页面可能已有足够内容，继续尝试
+            logger.warning(f"domcontentloaded 超时，继续: {url}")
 
-        # 等待页面稳定（JS 渲染评论区需要额外时间）
         await page.wait_for_timeout(2000)
 
-        # 触发懒加载
-        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-        await page.wait_for_timeout(1500)
-        await page.evaluate('window.scrollTo(0, 0)')
-        await page.wait_for_timeout(500)
+        # 2. 反爬 / 登录重定向检测（快速失败，不傻等 selector）
+        block_reason = await _check_blocked(page)
+        if block_reason:
+            await _dump_debug(page, "debug_blocked.png")
+            await browser.close()
+            raise RuntimeError(f"页面被拦截 [{url}]: {block_reason}")
 
-        # 等待目标元素出现
-        try:
-            await page.wait_for_selector(selector, timeout=selector_timeout)
-        except PlaywrightTimeoutError:
+        # 3. 分段慢速滚动到底部，确保触发评论区懒加载
+        # 今日头条评论区在滚动到文章末尾后才渲染，一次性跳到底部可能跳过懒加载触发点
+        await page.evaluate('''async () => {
+            await new Promise(resolve => {
+                const distance = 600;   // 每次滚动距离（px）
+                const delay = 200;      // 每次间隔（ms）
+                const timer = setInterval(() => {
+                    window.scrollBy(0, distance);
+                    if (window.scrollY + window.innerHeight >= document.body.scrollHeight) {
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, delay);
+            });
+        }''')
+        await page.wait_for_timeout(2000)   # 等待评论区 JS 渲染
+        await page.evaluate('window.scrollTo(0, 0)')
+        await page.wait_for_timeout(300)
+
+        # 4. 点击评论触发按钮（今日头条评论区默认折叠，需点击展开）
+        if click_comment_trigger:
+            for trigger_sel in TOUTIAO_COMMENT_TRIGGER_SELECTORS:
+                if await _try_click(page, trigger_sel):
+                    logger.info(f"已点击评论触发按钮: {trigger_sel}")
+                    await page.wait_for_timeout(1500)
+                    break
+            else:
+                logger.warning("未找到评论触发按钮，继续尝试 selector")
+
+        # 5. 多候选 selector 探测
+        matched = await _find_first_selector(page, candidates, timeout_each=selector_timeout)
+
+        if matched is None:
+            await _dump_debug(page, "debug_no_selector.png")
             await browser.close()
             raise ValueError(
-                f"在 {selector_timeout}ms 内未找到元素 '{selector}'，"
-                f"页面可能有反爬或需要登录: {url}"
+                f"所有 {len(candidates)} 个 selector 均未命中，"
+                f"请查看 debug_no_selector.png 更新 selector。URL: {url}"
             )
 
-        # 获取目标元素底部坐标
-        element_info = await page.evaluate('''
-            (selector) => {
-                const el = document.querySelector(selector);
-                if (!el) return null;
-                const rect = el.getBoundingClientRect();
-                return {
-                    bottom: rect.bottom + window.scrollY,
-                    width: document.documentElement.scrollWidth
-                };
-            }
-        ''', selector)
-
-        if not element_info:
+        # 6. 获取元素底部坐标
+        info = await _get_element_bottom(page, matched)
+        if not info:
             await browser.close()
-            raise ValueError(f"未找到元素: {selector}")
+            raise ValueError(f"获取元素坐标失败: {matched}")
 
-        target_bottom_y = element_info['bottom']  # 页面坐标系，元素底部距顶部距离
-        page_w = element_info['width']
+        target_bottom_y = info['bottom']
+        page_w = info['width']
 
-        # 截完整长页面（full_page=True 才能覆盖视口以外的区域）
+        # 7. 截完整长图
         screenshot_bytes = await page.screenshot(full_page=True)
         await browser.close()
 
-    # 裁剪：从顶部截到元素底部
-    # full_page 图片宽度 = 实际渲染宽度，需换算缩放比
+    # 8. 裁剪到元素底部
     img = Image.open(io.BytesIO(screenshot_bytes))
     scale = img.width / page_w if page_w else 1.0
     crop_h = int(target_bottom_y * scale)
@@ -180,12 +353,49 @@ async def take_screenshot(
 
     out = io.BytesIO()
     cropped.save(out, format='PNG')
-    screenshot_bytes = out.getvalue()
+    img_bytes = out.getvalue()
 
     if add_watermark:
-        screenshot_bytes = add_date_watermark(screenshot_bytes, position='top-right')
+        img_bytes = add_date_watermark(img_bytes, position='top-right')
 
     if output_path:
-        Path(output_path).write_bytes(screenshot_bytes)
+        Path(output_path).write_bytes(img_bytes)
 
-    return screenshot_bytes
+    return img_bytes
+
+
+# ── 今日头条快捷函数 ───────────────────────────────────────────────────────
+
+async def take_toutiao_screenshot(
+    url: str,
+    output_path: str | Path = None,
+    add_watermark: bool = True,
+    include_comments: bool = True,
+) -> bytes:
+    """
+    今日头条文章截图快捷入口。
+
+    实际页面行为（根据截图确认）：
+      - 无 cookie 访问可正常加载文章
+      - 评论区在滚动到文章末尾后自动渲染，无需点击
+      - 未登录时评论区显示「请先登录后发表评论～」
+
+    include_comments=True（默认）：截到评论区顶部（含「评论 N」标题）
+    include_comments=False：只截文章正文，速度更快
+    """
+    if include_comments:
+        return await take_screenshot(
+            url=url,
+            selector=TOUTIAO_COMMENT_AREA_SELECTORS,
+            output_path=output_path,
+            add_watermark=add_watermark,
+            click_comment_trigger=False,   # 评论区无需点击，滚动后自动出现
+        )
+    else:
+        return await take_screenshot(
+            url=url,
+            selector=TOUTIAO_ARTICLE_END_SELECTORS,
+            output_path=output_path,
+            add_watermark=add_watermark,
+            click_comment_trigger=False,
+        )
