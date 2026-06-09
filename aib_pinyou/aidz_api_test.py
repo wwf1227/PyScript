@@ -6,6 +6,7 @@ import uuid
 import urllib.request
 import urllib.error
 from collections import defaultdict
+import pandas as pd
 
 # ===== 配置区域 =====
 ENVIRONMENTS = {
@@ -57,6 +58,7 @@ MENU = [
     ("listByTimeRange   按时间范围过滤", "menu_listByTimeRange"),
     ("listByStatusAndTime 状态+时间范围", "menu_listByStatusAndTimeRange"),
     ("listByTimeRange + askMethod 统计", "menu_statByAskMethod"),
+    ("按时间范围统计使用量并导出Excel", "menu_exportUsageByTimeRange"),
     ("loadTasks         Load 任务到系统", "menu_loadTasks"),
     ("testInvalidSign   签名错误测试", "menu_invalidSignature"),
     ("退出", "quit"),
@@ -331,6 +333,82 @@ def menu_statByAskMethod():
             f"  askMethod={ask_method:<12} 任务数={task_count}  "
             f"repeatCount数={repeat_count}  totalDataCount总数={total_data_count}"
         )
+
+
+# ================================================================== 新增：发送请求并返回二进制（用于下载Excel）
+def send_raw(method, path, body_json, override_signature=None):
+    sign_path = BASE_URL.split("://", 1)[1].split("/", 1)[1]
+    sign_path = "/" + sign_path + path
+    query_idx = sign_path.find("?")
+    if query_idx > 0:
+        sign_path = sign_path[:query_idx]
+
+    timestamp = str(int(time.time()))
+    nonce = str(uuid.uuid4())
+    body_bytes = body_json.encode("utf-8")
+    body_sha256 = sha256_hex(body_bytes)
+
+    string_to_sign = (
+        method.upper()
+        + "\n"
+        + sign_path
+        + "\n"
+        + timestamp
+        + "\n"
+        + nonce
+        + "\n"
+        + body_sha256
+    )
+
+    signature = (
+        override_signature
+        if override_signature is not None
+        else hmac_sha256_hex(API_SECRET, string_to_sign)
+    )
+
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "X-Api-Key": API_KEY,
+        "X-Api-Timestamp": timestamp,
+        "X-Api-Nonce": nonce,
+        "X-Api-Signature": signature,
+    }
+
+    data = body_bytes if method.upper() != "GET" and len(body_bytes) > 0 else None
+    req = urllib.request.Request(
+        BASE_URL + path, data=data, headers=headers, method=method.upper()
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            return response.read()  # 直接返回二进制，不 decode
+    except urllib.error.HTTPError as e:
+        return e.read()
+    
+def menu_exportUsageByTimeRange():
+    # 提示用户输入时间范围
+    start_time = prompt("start_time (ms 时间戳)", "1779638400000")
+    end_time = prompt("end_time   (ms 时间戳)", "1779984000000")
+    
+    # 构建请求参数
+    query_params = f"?start_time={start_time}&end_time={end_time}"
+    print(f"\n  正在请求使用量数据: GET /usage/export{query_params}")
+    
+    # 直接获取二进制内容（不解析JSON，不解码utf-8）
+    excel_content = send_raw("GET", f"/usage/export{query_params}", "")
+    
+    if not excel_content:
+        print("  ⚠ 未获取到数据")
+        return
+
+    # 保存为 Excel 文件
+    file_timestamp = int(time.time())
+    excel_file = f"./使用量统计_{file_timestamp}.xlsx"
+    
+    with open(excel_file, "wb") as f:
+        f.write(excel_content)
+    
+    print(f"\n✅ 导出成功！文件已保存到：\n{excel_file}")
 
 
 def menu_loadTasks():
