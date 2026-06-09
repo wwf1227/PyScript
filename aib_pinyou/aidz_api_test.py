@@ -15,11 +15,11 @@ ENVIRONMENTS = {
     },
     "2": {
         "name": "Beta",
-        "base_url": "https://appbeta.tingyun.com/appops/rpc.po/deepzore/api/v1",
+        "base_url": "https://wukong1beta.tingyun.com/appops/rpc.po/deepzore/api/v1",
     },
     "3": {
         "name": "线上",
-        "base_url": "https://app.tingyun.com/appops/rpc.po/deepzore/api/v1",
+        "base_url": "https://wukong1.tingyun.com/appops/rpc.po/deepzore/api/v1",
     },
 }
 ACCOUNTS = {
@@ -234,7 +234,49 @@ def menu_listByTimeRange():
     end = prompt("end_time   (ms 时间戳)", "1779984000000")
     query = f"?start_time={start}&end_time={end}"
     resp = send("GET", f"/tasks{query}", "")
-    print_result_pretty(resp)
+    try:
+        data = json.loads(resp)
+    except Exception:
+        print(resp)
+        return
+    # print_result_pretty(resp)
+    tasks = data.get("data") or []
+    # 按 askMethod 分组
+    by_ask_method = {}
+
+    for task in tasks:
+        method = task.get("askMethod", "unknown")
+        by_ask_method.setdefault(method, []).append(task)
+
+    print("\n========== 按 askMethod 汇总 ==========")
+    for method, group in by_ask_method.items():
+        task_count = 0
+        repeat_count = 0
+        total_data_count = 0
+
+        for task in group:
+            task_id = task.get("taskId", "")
+            batch_id = task.get("batchId", "")
+
+            task_resp = send("GET", f"/tasks/{task_id}/data?batch_id={batch_id}", "")
+            try:
+                task_data = json.loads(task_resp)
+            except Exception:
+                task_data = {}
+
+            data_count = 0
+            if task_data.get("code") == 0:
+                for item in task_data.get("data") or []:
+                    data_count += len(item.get("data") or [])
+
+            if data_count > 0:
+                task_count += 1
+                repeat_count += task.get("repeatCount", 0)
+                total_data_count += data_count
+
+        print(
+            f"askMethod={method:<12} 任务数={task_count}  客户下发任务数量={repeat_count}  实际上报数量={total_data_count}"
+        )
 
 
 def menu_listByStatusAndTimeRange():
