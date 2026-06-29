@@ -20,7 +20,7 @@ def generate_fluctuation(row, fluctuation=0.05):
     new_row = row.copy()
     for col in row.index[:-1]:  # 忽略最后一列平均值
         factor = 1 + np.random.uniform(-fluctuation, fluctuation)
-        new_row[col] = round(row[col] * factor)
+        new_row[col] = round(row[col] * factor,2)
     return new_row
 
 new_data = data.apply(generate_fluctuation, axis=1)
