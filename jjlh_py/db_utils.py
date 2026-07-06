@@ -37,6 +37,7 @@ async def init_db(db: aiosqlite.Connection) -> None:
             cum_position INTEGER,
             last_amount  REAL,
             created_at   TEXT,
+            local_time   TEXT,
             created_ts   INTEGER    -- created_at 对应的 Unix 毫秒时间戳，用于按时间查询/清理
         )
         """
@@ -69,21 +70,21 @@ async def insert_tick(db: aiosqlite.Connection, tick: dict) -> None:
             INSERT INTO ticks (
                 symbol, open, high, low, price,
                 cum_volume, cum_amount, trade_type, last_volume,
-                cum_position, last_amount, created_at, created_ts
+                cum_position, last_amount, created_at, local_time, created_ts
             ) VALUES (
                 :symbol, :open, :high, :low, :price,
                 :cum_volume, :cum_amount, :trade_type, :last_volume,
-                :cum_position, :last_amount, :created_at, :created_ts
+                :cum_position, :last_amount, :created_at, :local_time, :created_ts
             )
             """,
             {**tick, "created_ts": _to_ts_ms(tick["created_at"])},
         )
-        await db.commit()
-        logging.debug("[db_utils] 归档 tick: %s price=%s", tick["created_at"], tick["price"])
+        # logging.info("[db_utils] 写入 tick: %s local=%s price=%s",
+        #              tick["created_at"], tick.get("local_time", ""), tick["price"])
     except Exception:
         logging.exception("[db_utils] 写入失败，丢弃本条 tick")
 
-
+ 
 # ───────────────────────── 清理 ─────────────────────────
 
 async def purge_old_ticks(db: aiosqlite.Connection, keep_days: int = 30) -> int:

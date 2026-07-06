@@ -15,6 +15,7 @@ import signal
 import socket
 import threading
 import time
+from datetime import datetime
 
 import aiosqlite
 
@@ -26,6 +27,7 @@ REPORTER_HOST  = "127.0.0.1"
 REPORTER_PORT  = 19999
 QUEUE_MAXSIZE  = 5000       # 归档队列上限，超出则丢弃（不影响 UDP 实时推送）
 PURGE_INTERVAL = 86400      # 归档清理周期：每 24 小时执行一次（秒）
+COMMIT_BATCH   = 10         # 每积攒多少条 tick 后批量 commit 一次
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,7 +44,8 @@ _udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 # ─────────────────────── 归档任务 ───────────────────────
 
 async def _archive_worker():
-    """消费队列，将 tick 写入 SQLite 归档"""
+    """消费队列，将 tick 写入 SQLite 归档；每 COMMIT_BATCH 条或队列空闲时批量 commit"""
+    pending = 0
     async with aiosqlite.connect(DB_PATH, timeout=30) as db:
         await init_db(db)
         while True:
@@ -50,10 +53,18 @@ async def _archive_worker():
                 tick = await asyncio.wait_for(_queue.get(), timeout=1.0)
                 _queue.task_done()
                 await insert_tick(db, tick)
+                pending += 1
+                if pending >= COMMIT_BATCH:
+                    await db.commit()
+                    pending = 0
             except asyncio.TimeoutError:
-                pass
+                if pending > 0:
+                    await db.commit()
+                    pending = 0
 
             if _shutdown.is_set() and _queue.empty():
+                if pending > 0:
+                    await db.commit()
                 break
 
     logging.info("[Writer] 归档任务已安全退出")
@@ -114,20 +125,22 @@ def on_tick(context, tick):
         "cum_position": int(tick.cum_position),
         "last_amount":  float(tick.last_amount),
         "created_at":   str(tick.created_at),
+        "local_time":   datetime.now().astimezone().isoformat(),
     }
-
+    logging.info("[on_tick] 回调 tick: %s local=%s price=%s",
+                     tick_data["created_at"], tick_data.get("local_time", ""), tick_data["price"])
     # 1. UDP 实时推送给 Reporter（同步发送，微秒级，不阻塞回调）
-    try:
-        _udp_sock.sendto(
-            json.dumps(tick_data).encode("utf-8"),
-            (REPORTER_HOST, REPORTER_PORT),
-        )
-        logging.info(
-            "[Writer] UDP 已推送: %s price=%s",
-            tick_data["created_at"], tick_data["price"],
-        )
-    except Exception as e:
-        logging.warning("[Writer] UDP 发送失败: %s", e)
+    # try:
+    #     _udp_sock.sendto(
+    #         json.dumps(tick_data).encode("utf-8"),
+    #         (REPORTER_HOST, REPORTER_PORT),
+    #     )
+    #     logging.info(
+    #         "[Writer] UDP 已推送: %s price=%s",
+    #         tick_data["created_at"], tick_data["price"],
+    #     )
+    # except Exception as e:
+    #     logging.warning("[Writer] UDP 发送失败: %s", e)
 
     # 2. 异步写 DB 归档（队列满时丢弃，不影响实时推送）
     try:
