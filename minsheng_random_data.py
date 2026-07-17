@@ -20,7 +20,7 @@ def generate_fluctuation(row, fluctuation=0.05):
     new_row = row.copy()
     for col in row.index[:-1]:  # 忽略最后一列平均值
         factor = 1 + np.random.uniform(-fluctuation, fluctuation)
-        new_row[col] = round(row[col] * factor,2)
+        new_row[col] = round(row[col] * factor)
     return new_row
 
 new_data = data.apply(generate_fluctuation, axis=1)
@@ -37,7 +37,11 @@ for i in range(len(data)):
         # 更新平均值
         new_data.loc[i, '原始平均'] = new_data.iloc[i, :-1].mean()
 
-# ===== 5. 输出生成的新数据 =====
+# ===== 5. 最终结果四舍五入取整（无小数），保留「原始平均」列小数 =====
+data_cols = new_data.columns[:-1]  # 除最后一列平均值外的数据列
+new_data[data_cols] = new_data[data_cols].round(0).astype(int)
+
+# ===== 6. 输出生成的新数据 =====
 output_file = "生成数据.xlsx"  # 或 "生成数据.csv"
 if output_file.endswith(".xlsx") or output_file.endswith(".xls"):
     new_data.to_excel(output_file, index=False)
