@@ -37,9 +37,9 @@ ACCOUNTS = {
 }
 # ====================
 
-BASE_URL = ENVIRONMENTS["1"]["base_url"]
-API_KEY = ACCOUNTS["1"]["api_key"]
-API_SECRET = ACCOUNTS["1"]["api_secret"]
+BASE_URL = ENVIRONMENTS["2"]["base_url"]
+API_KEY = ACCOUNTS["2"]["api_key"]
+API_SECRET = ACCOUNTS["2"]["api_secret"]
 
 
 # ================================================================== 菜单
@@ -150,10 +150,10 @@ def menu_createTask():
     task_id = prompt("task_id", "0511")
     batch_id = prompt("batch_id", "001")
     question = prompt("question", "今天哪些股票涨得好？")
-    repeat_count = prompt_int("repeat_count", 10)
+    repeat_count = prompt_int("repeat_count", 20)
     platform = prompt("platform_group", "doubao_app")
-    device_type = prompt("device_type", "ios")
-    ask_method = prompt("ask_method", "thinking")
+    device_type = prompt("device_type", "android")
+    ask_method = prompt("ask_method", "quick")
 
     scope = {
         "platform_group": [platform],
