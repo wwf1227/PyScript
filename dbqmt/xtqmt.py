@@ -3,9 +3,10 @@
 """
 xtqmt.py  ——  xtquant 行情进程
 职责：
-  1. 接收 xtquant 的 tick 回调
-  2. 通过 UDP 实时推送给 tick_reporter（同机器，普通网络进程）
-  3. 异步写入本地 SQLite 做归档备份，每天定时清理 1 个月前的数据
+  1. 监听 UDP 端口，实时接收 tick_reporter 推送的股票代码更新
+  2. 接收 xtquant 的 tick 回调
+  3. 通过 UDP 实时推送给 tick_reporter（同机器，普通网络进程）
+  4. 异步写入本地 SQLite 做归档备份，每天定时清理 1 个月前的数据
 """
 
 import asyncio
@@ -28,7 +29,11 @@ REPORTER_PORT  = 19999
 QUEUE_MAXSIZE  = 5000       # 归档队列上限，超出则丢弃（不影响 UDP 实时推送）
 PURGE_INTERVAL = 86400      # 归档清理周期：每 24 小时执行一次（秒）
 
-STOCK_CODE = "000001.SH"
+# 接收 tick_reporter 推送股票代码的 UDP 监听地址
+CODES_LISTEN_HOST = "127.0.0.1"
+CODES_LISTEN_PORT = 19998
+CODES_RECV_TIMEOUT = 60     # UDP 接收超时（秒），超时后检查 shutdown
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +45,14 @@ _queue: asyncio.Queue | None = None
 _shutdown: asyncio.Event | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# 当前已订阅的股票代码 → subscription_id 映射
+_sub_ids: dict[str, int] = {}
+# 当前已订阅的股票代码集合（供回调线程安全读取）
+_subscribed_codes: set[str] = set()
+_sub_lock = threading.Lock()
+# 上次从 API 获取到的 lastUpdateTime，用于跳过无变化的更新
+_last_update_time: int = 0
 
 
 # ─────────────────────── 归档任务 ───────────────────────
@@ -96,6 +109,98 @@ def _run_loop():
         _loop.close()
 
 
+# ─────────────────────── 股票代码接收 ───────────────────────
+
+def _setup_codes_listener() -> socket.socket:
+    """创建并绑定 UDP 监听 socket，用于接收 reporter 推送的股票代码"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((CODES_LISTEN_HOST, CODES_LISTEN_PORT))
+    sock.settimeout(CODES_RECV_TIMEOUT)
+    logging.info("[XtWriter] 监听 UDP %s:%d 等待代码推送...", CODES_LISTEN_HOST, CODES_LISTEN_PORT)
+    return sock
+
+
+def receive_codes_from_udp(sock: socket.socket) -> tuple[list[str] | None, int]:
+    """
+    阻塞等待 reporter 推送股票代码（最多 CODES_RECV_TIMEOUT 秒）。
+    返回 (代码列表, lastUpdateTime)；超时时返回 (None, 0)。
+    """
+    try:
+        data, addr = sock.recvfrom(65536)
+    except socket.timeout:
+        return None, 0
+
+    try:
+        msg = json.loads(data.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError) as e:
+        logging.warning("[XtWriter] 解析代码推送消息失败: %s", e)
+        return None, 0
+
+    codes = msg.get("stockCode", [])
+    last_update = msg.get("lastUpdateTime", 0)
+    logging.info(
+        "[XtWriter] 收到代码推送: %d 个标的, lastUpdateTime=%s",
+        len(codes),
+        datetime.datetime.fromtimestamp(last_update / 1000).isoformat() if last_update else "N/A",
+    )
+    return codes, last_update
+
+
+# ─────────────────────── 订阅管理 ───────────────────────
+
+def _diff_codes(new_codes: list[str]) -> tuple[list[str], list[str]]:
+    """对比新旧代码列表，返回 (需要新增的, 需要退订的)"""
+    old_set = set(_sub_ids.keys())
+    new_set = set(new_codes)
+    to_add = list(new_set - old_set)
+    to_remove = list(old_set - new_set)
+    return to_add, to_remove
+
+
+def update_subscriptions(new_codes: list[str]):
+    """
+    增量更新股票订阅：只订阅新增的，只退订移除的，不变的保持不动。
+    """
+    global _subscribed_codes
+
+    to_add, to_remove = _diff_codes(new_codes)
+
+    # 退订移除的代码
+    for code in to_remove:
+        seq = _sub_ids.pop(code, None)
+        if seq is not None:
+            try:
+                xtdata.unsubscribe_quote(seq)
+                logging.info("[XtWriter] 已退订 %s (seq=%s)", code, seq)
+            except Exception as e:
+                logging.warning("[XtWriter] 退订 %s 失败: %s", code, e)
+
+    # 订阅新增的代码
+    for code in to_add:
+        try:
+            seq = xtdata.subscribe_quote(
+                stock_code=code,
+                period="tick",
+                callback=tick_callback,
+                count=-1,
+            )
+            _sub_ids[code] = seq
+            logging.info("[XtWriter] 已订阅 %s (seq=%s)", code, seq)
+        except Exception as e:
+            logging.warning("[XtWriter] 订阅 %s 失败: %s", code, e)
+
+    # 更新全局代码集合（线程安全）
+    with _sub_lock:
+        _subscribed_codes = set(_sub_ids.keys())
+
+    if to_add or to_remove:
+        logging.info(
+            "[XtWriter] 订阅更新完成: +%d -%d, 当前共 %d 个标的",
+            len(to_add), len(to_remove), len(_sub_ids),
+        )
+
+
 # ─────────────────────── xtquant tick 回调 ───────────────────────
 
 def tick_callback(datas):
@@ -113,8 +218,11 @@ def tick_callback(datas):
             for tick in (ticks if isinstance(ticks, list) else [ticks])
         ]
     else:
+        # 多标的订阅时 xtquant 一律回调 dict 格式，此分支仅作单标的兜底
         raw = datas if isinstance(datas, list) else [datas]
-        items = [(STOCK_CODE, tick) for tick in raw]
+        with _sub_lock:
+            first_code = next(iter(_subscribed_codes), "UNKNOWN")
+        items = [(first_code, tick) for tick in raw]
 
     for symbol, raw_tick in items:        
         tick_data = {
@@ -184,22 +292,29 @@ else:
 
 logging.info("[XtWriter] 后台线程已就绪")
 
-# ─────────────────────── 订阅行情 ───────────────────────
+# ─────────────────────── 主循环：实时接收代码推送 + 增量订阅 ───────────────────────
+
+_codes_sock = _setup_codes_listener()
+
 try:
-    logging.info("[XtWriter] 开始订阅 %s Tick...", STOCK_CODE)
-    xtdata.subscribe_quote(
-        stock_code=STOCK_CODE,
-        period="tick",
-        callback=tick_callback,
-        count=-1,
-    )
-    logging.info("[XtWriter] 订阅成功，等待行情推送...")
     while True:
-        time.sleep(1)
+        new_codes, last_update = receive_codes_from_udp(_codes_sock)
+
+        if new_codes is not None:
+            # reporter 推送前已过滤无变化的情况，这里直接更新即可
+            _last_update_time = last_update
+            update_subscriptions(new_codes)
+        # else: UDP 超时（reporter 可能挂了或网络问题），保持现有订阅不变，继续等待
+
 except KeyboardInterrupt:
     logging.info("[XtWriter] 收到 KeyboardInterrupt")
 finally:
-    xtdata.unsubscribe_quote(STOCK_CODE, period="tick")
+    _codes_sock.close()
+    for code, seq in _sub_ids.items():
+        try:
+            xtdata.unsubscribe_quote(seq)
+        except Exception as e:
+            logging.warning("[XtWriter] 取消订阅 %s 失败: %s", code, e)
     logging.info("[XtWriter] 已取消 xtquant 订阅")
     _trigger_shutdown()
     _bg_thread.join(timeout=15)

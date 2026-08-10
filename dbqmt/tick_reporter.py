@@ -3,20 +3,34 @@
 """
 tick_reporter.py  ——  普通网络进程
 职责：
-  1. 监听 UDP 端口，接收 tick_writer 实时推送的 tick
+  1. 监听 UDP 端口，接收 xtqmt 实时推送的 tick
   2. 通过 aiohttp（连接池复用）上报到外部平台
+  3. 定期从 API 拉取运行时股票代码，变化时通过 UDP 推送给 xtqmt
 """
 
 import asyncio
 import json
 import logging
 import signal
+import socket
+import time
 
 import aiohttp
 
-REPORT_URL  = "https://appalpha1.tingyun.com/appdatasvr/finbench/v1/data/standard-dbqmt"
+API_HOST = "https://appalpha1.tingyun.com"
+
+REPORT_URL  = f"{API_HOST}/appdatasvr/finbench/v1/data/standard-dbqmt"
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 19999
+
+# ── 股票代码拉取配置 ──
+RUNTIME_CODE_URL = f"{API_HOST}/apptasksvr/stock-manager/query-runtime-code"
+API_TIMEOUT = aiohttp.ClientTimeout(total=5)
+POLL_INTERVAL = 60            # 每 60 秒拉取一次
+
+# 推送给 xtqmt 的 UDP 地址
+CODES_PUSH_HOST = "127.0.0.1"
+CODES_PUSH_PORT = 19998
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,6 +118,91 @@ async def _report_worker(queue: asyncio.Queue, session: aiohttp.ClientSession):
     logging.info("[Reporter] 上报任务已退出")
 
 
+# ─────────────────────── 股票代码拉取 ───────────────────────
+
+async def _fetch_runtime_codes(session: aiohttp.ClientSession) -> tuple[list[str] | None, int]:
+    """
+    从服务端获取运行时股票代码列表。
+    返回 (代码列表, lastUpdateTime)；失败时列表为 None。
+    """
+    try:
+        async with session.get(RUNTIME_CODE_URL, timeout=API_TIMEOUT) as resp:
+            resp.raise_for_status()
+            result = await resp.json()
+    except aiohttp.ClientResponseError as e:
+        logging.warning("[Reporter] 拉取股票代码失败 HTTP=%s", e.status)
+        return None, 0
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logging.warning("[Reporter] 拉取股票代码失败（网络错误）: %s", e)
+        return None, 0
+    except ValueError as e:
+        logging.warning("[Reporter] 拉取股票代码失败（JSON 解析错误）: %s", e)
+        return None, 0
+
+    if not result.get("success"):
+        logging.warning("[Reporter] 拉取股票代码失败（业务错误）: %s", result.get("message"))
+        return None, 0
+
+    data = result.get("data")
+    if data is None:
+        logging.warning("[Reporter] 拉取股票代码失败: data 为 null")
+        return None, 0
+
+    codes = data.get("stockCode", [])
+    last_update = data.get("lastUpdateTime", 0)
+    logging.info("[Reporter] 拉取股票代码成功: %d 个标的, lastUpdateTime=%s",
+                 len(codes),
+                 time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_update / 1000)) if last_update else "N/A")
+    return codes, last_update
+
+
+def _push_codes_via_udp(codes: list[str], last_update: int) -> None:
+    """通过 UDP 将股票代码列表推送给 xtqmt"""
+    data = json.dumps({
+        "lastUpdateTime": last_update,
+        "stockCode": codes,
+    }, ensure_ascii=False).encode("utf-8")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(data, (CODES_PUSH_HOST, CODES_PUSH_PORT))
+        logging.info("[Reporter] 已推送 %d 个标的到 xtqmt", len(codes))
+    except Exception as e:
+        logging.warning("[Reporter] 推送股票代码失败: %s", e)
+    finally:
+        sock.close()
+
+
+async def _codes_poller(session: aiohttp.ClientSession):
+    """
+    定期从 API 拉取股票代码，仅变化时推送给 xtqmt。
+    启动时立即拉取并推送一次，之后每 POLL_INTERVAL 秒拉取一次。
+    """
+    last_codes: list[str] | None = None
+
+    while True:
+        # 等待 POLL_INTERVAL 秒或 shutdown（首次跳过等待）
+        if last_codes is not None:
+            try:
+                await asyncio.wait_for(_shutdown.wait(), timeout=POLL_INTERVAL)
+                break  # shutdown 触发
+            except asyncio.TimeoutError:
+                pass
+
+        codes, last_update = await _fetch_runtime_codes(session)
+        if codes is None:
+            logging.warning("[Reporter] 拉取股票代码失败，保留上次列表不变")
+            continue
+
+        # 仅在有变化时推送（首次必须推送）
+        if last_codes is None or set(codes) != set(last_codes):
+            _push_codes_via_udp(codes, last_update)
+            last_codes = codes
+        else:
+            logging.debug("[Reporter] 股票代码未变化，跳过推送")
+
+    logging.info("[Reporter] 股票代码拉取任务已退出")
+
+
 # ─────────────────────── 主循环 ───────────────────────
 
 async def main():
@@ -123,7 +222,10 @@ async def main():
     # 创建 aiohttp Session（连接池复用，整个进程生命周期共享）
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(connector=connector) as session:
-        await _report_worker(queue, session)
+        await asyncio.gather(
+            _report_worker(queue, session),
+            _codes_poller(session),
+        )
 
     transport.close()
     logging.info("[Reporter] 进程已安全退出")
