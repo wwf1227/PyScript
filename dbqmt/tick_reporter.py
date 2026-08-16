@@ -6,11 +6,14 @@ tick_reporter.py  ——  普通网络进程
   1. 监听 UDP 端口，接收 xtqmt 实时推送的 tick
   2. 通过 aiohttp（连接池复用）上报到外部平台
   3. 定期从 API 拉取运行时股票代码，变化时通过 UDP 推送给 xtqmt
+  4. 每天上传 xtqmt 采集的股票/指数基础数据到服务端
 """
 
 import asyncio
+import datetime
 import json
 import logging
+import os
 import signal
 import socket
 import time
@@ -31,6 +34,11 @@ POLL_INTERVAL = 60            # 每 60 秒拉取一次
 # 推送给 xtqmt 的 UDP 地址
 CODES_PUSH_HOST = "127.0.0.1"
 CODES_PUSH_PORT = 19998
+
+# ── 股票基础数据上传配置 ──
+UPLOAD_URL = f"{API_HOST}/stock-manager/upload-code-data"
+STOCK_BASE_FILE = "stock_base.txt"          # xtqmt 采集写入的共享文件
+UPLOAD_CHECK_INTERVAL = 60                  # 每分钟检查一次是否有新文件
 
 logging.basicConfig(
     level=logging.INFO,
@@ -203,6 +211,65 @@ async def _codes_poller(session: aiohttp.ClientSession):
     logging.info("[Reporter] 股票代码拉取任务已退出")
 
 
+# ─────────────────────── 股票基础数据上传 ───────────────────────
+
+async def _upload_stock_base(session: aiohttp.ClientSession) -> bool:
+    """将 stock_base.txt 以 multipart/form-data 上传到服务端，成功返回 True"""
+    try:
+        with open(STOCK_BASE_FILE, "rb") as f:
+            data = aiohttp.FormData()
+            data.add_field("file", f, filename="stock_base.txt", content_type="text/plain")
+            async with session.post(UPLOAD_URL, data=data, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                resp.raise_for_status()
+                body = await resp.json()
+    except aiohttp.ClientResponseError as e:
+        body_text = await e.response.text() if e.response else ""
+        logging.error("[Reporter] 上传股票基础数据失败 HTTP=%s body=%s", e.status, body_text)
+        return False
+    except Exception as e:
+        logging.error("[Reporter] 上传股票基础数据异常: %s", e)
+        return False
+
+    if body.get("resultCode") != 0:
+        logging.error("[Reporter] 上传股票基础数据失败: %s", body.get("resultMsg"))
+        return False
+
+    d = body.get("data") or {}
+    logging.info(
+        "[Reporter] 上传股票基础数据成功: 总计 %s 条，新增 %s，更新 %s，无变化 %s，非法 %s",
+        d.get("total"), d.get("insert"), d.get("update"), d.get("unchanged"), d.get("invalid"),
+    )
+    return True
+
+
+async def _stock_base_uploader(session: aiohttp.ClientSession):
+    """
+    检测 stock_base.txt 是否出现当天新生成的文件，出现则上传一次。
+    每天最多上传一次，避免重复（上传本身幂等，重复也无害）；失败会重试。
+    """
+    last_upload_date = None
+    while True:
+        try:
+            await asyncio.wait_for(_shutdown.wait(), timeout=UPLOAD_CHECK_INTERVAL)
+            break  # shutdown 触发
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            if not os.path.exists(STOCK_BASE_FILE):
+                continue
+            file_date = datetime.date.fromtimestamp(os.path.getmtime(STOCK_BASE_FILE))
+            today = datetime.date.today()
+            # 仅上传当天新生成的文件，且当天只上传成功一次
+            if file_date == today and last_upload_date != today:
+                if await _upload_stock_base(session):
+                    last_upload_date = today
+        except Exception:
+            logging.exception("[Reporter] 股票基础数据上传检查异常")
+
+    logging.info("[Reporter] 股票基础数据上传任务已退出")
+
+
 # ─────────────────────── 主循环 ───────────────────────
 
 async def main():
@@ -225,6 +292,7 @@ async def main():
         await asyncio.gather(
             _report_worker(queue, session),
             _codes_poller(session),
+            _stock_base_uploader(session),
         )
 
     transport.close()

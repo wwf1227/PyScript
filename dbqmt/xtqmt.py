@@ -22,6 +22,7 @@ import aiosqlite
 
 from xtquant import xtdata
 from db_utils import DB_PATH, init_db, insert_tick, purge_old_ticks
+from stock_base import STOCK_BASE_FILE, collect_stock_base, write_stock_base_file
 
 # ─────────────────────── 配置 ───────────────────────
 REPORTER_HOST  = "127.0.0.1"
@@ -33,6 +34,12 @@ PURGE_INTERVAL = 86400      # 归档清理周期：每 24 小时执行一次（�
 CODES_LISTEN_HOST = "127.0.0.1"
 CODES_LISTEN_PORT = 19998
 CODES_RECV_TIMEOUT = 60     # UDP 接收超时（秒），超时后检查 shutdown
+
+# 股票基础数据每日采集时间（开盘 09:30 前）
+COLLECT_HOUR = 8
+COLLECT_MINUTE = 30
+COLLECT_RETRY_HOUR = 9      # 采集失败时重试到 09:30
+COLLECT_RETRY_MINUTE = 30
 
 
 logging.basicConfig(
@@ -53,6 +60,8 @@ _subscribed_codes: set[str] = set()
 _sub_lock = threading.Lock()
 # 上次从 API 获取到的 lastUpdateTime，用于跳过无变化的更新
 _last_update_time: int = 0
+# 采集线程与订阅更新共用，避免 xtdata 并发调用
+_xtdata_lock = threading.Lock()
 
 
 # ─────────────────────── 归档任务 ───────────────────────
@@ -166,29 +175,31 @@ def update_subscriptions(new_codes: list[str]):
 
     to_add, to_remove = _diff_codes(new_codes)
 
-    # 退订移除的代码
-    for code in to_remove:
-        seq = _sub_ids.pop(code, None)
-        if seq is not None:
-            try:
-                xtdata.unsubscribe_quote(seq)
-                logging.info("[XtWriter] 已退订 %s (seq=%s)", code, seq)
-            except Exception as e:
-                logging.warning("[XtWriter] 退订 %s 失败: %s", code, e)
+    # 订阅/退订与采集线程共用锁，避免 xtdata 并发调用
+    with _xtdata_lock:
+        # 退订移除的代码
+        for code in to_remove:
+            seq = _sub_ids.pop(code, None)
+            if seq is not None:
+                try:
+                    xtdata.unsubscribe_quote(seq)
+                    logging.info("[XtWriter] 已退订 %s (seq=%s)", code, seq)
+                except Exception as e:
+                    logging.warning("[XtWriter] 退订 %s 失败: %s", code, e)
 
-    # 订阅新增的代码
-    for code in to_add:
-        try:
-            seq = xtdata.subscribe_quote(
-                stock_code=code,
-                period="tick",
-                callback=tick_callback,
-                count=-1,
-            )
-            _sub_ids[code] = seq
-            logging.info("[XtWriter] 已订阅 %s (seq=%s)", code, seq)
-        except Exception as e:
-            logging.warning("[XtWriter] 订阅 %s 失败: %s", code, e)
+        # 订阅新增的代码
+        for code in to_add:
+            try:
+                seq = xtdata.subscribe_quote(
+                    stock_code=code,
+                    period="tick",
+                    callback=tick_callback,
+                    count=-1,
+                )
+                _sub_ids[code] = seq
+                logging.info("[XtWriter] 已订阅 %s (seq=%s)", code, seq)
+            except Exception as e:
+                logging.warning("[XtWriter] 订阅 %s 失败: %s", code, e)
 
     # 更新全局代码集合（线程安全）
     with _sub_lock:
@@ -199,6 +210,36 @@ def update_subscriptions(new_codes: list[str]):
             "[XtWriter] 订阅更新完成: +%d -%d, 当前共 %d 个标的",
             len(to_add), len(to_remove), len(_sub_ids),
         )
+
+
+# ─────────────────────── 股票基础数据采集 ───────────────────────
+
+def _stock_base_scheduler():
+    """
+    每天 08:30 采集一次股票/指数基础数据，写入 stock_base.txt。
+    失败时在 08:30–09:30 窗口内每分钟重试，成功当天不再重复。
+    运行在独立 daemon 线程，不阻塞主线程 UDP 接收。
+    """
+    done_date = None
+    while True:
+        now = datetime.datetime.now()
+        in_window = (
+            (now.hour, now.minute) >= (COLLECT_HOUR, COLLECT_MINUTE)
+            and (now.hour, now.minute) <= (COLLECT_RETRY_HOUR, COLLECT_RETRY_MINUTE)
+        )
+
+        if in_window and done_date != now.date():
+            logging.info("[XtWriter] 开始采集股票基础数据...")
+            try:
+                with _xtdata_lock:
+                    rows = collect_stock_base()
+                write_stock_base_file(rows)
+                done_date = now.date()
+                logging.info("[XtWriter] 股票基础数据采集完成，共 %d 条", len(rows))
+            except Exception:
+                logging.exception("[XtWriter] 股票基础数据采集失败，稍后重试")
+
+        time.sleep(30)
 
 
 # ─────────────────────── xtquant tick 回调 ───────────────────────
@@ -291,6 +332,10 @@ else:
     raise RuntimeError("[XtWriter] 异步服务启动超时")
 
 logging.info("[XtWriter] 后台线程已就绪")
+
+# 启动股票基础数据采集线程（daemon，随进程退出）
+_stock_base_thread = threading.Thread(target=_stock_base_scheduler, name="StockBaseScheduler", daemon=True)
+_stock_base_thread.start()
 
 # ─────────────────────── 主循环：实时接收代码推送 + 增量订阅 ───────────────────────
 
