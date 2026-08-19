@@ -41,7 +41,7 @@ CODES_PUSH_HOST = "127.0.0.1"
 CODES_PUSH_PORT = 19998
 
 # ── 股票基础数据上传配置 ──
-UPLOAD_URL = f"{API_HOST}/stock-manager/upload-code-data"
+UPLOAD_URL = f"{API_HOST}/apptasksvr/stock-manager/upload-code-data"
 STOCK_BASE_FILE = "stock_base.txt"          # xtqmt 采集写入的共享文件
 UPLOAD_CHECK_INTERVAL = 60                  # 每分钟检查一次是否有新文件
 
@@ -295,9 +295,9 @@ async def main():
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(connector=connector) as session:
         await asyncio.gather(
-            # _report_worker(queue, session),
+            _report_worker(queue, session),
             _codes_poller(session),
-            # _stock_base_uploader(session),
+            _stock_base_uploader(session),
         )
 
     transport.close()
