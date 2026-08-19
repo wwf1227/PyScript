@@ -19,8 +19,10 @@ import socket
 import time
 
 import aiohttp
+import certifi
+import ssl
 
-API_HOST = "https://appalpha1.tingyun.com"
+API_HOST = "https://wkatt1.tingyun.com"
 
 REPORT_URL  = f"{API_HOST}/appdatasvr/finbench/v1/data/standard-dbqmt"
 LISTEN_HOST = "127.0.0.1"
@@ -30,6 +32,9 @@ LISTEN_PORT = 19999
 RUNTIME_CODE_URL = f"{API_HOST}/apptasksvr/stock-manager/query-runtime-code"
 API_TIMEOUT = aiohttp.ClientTimeout(total=5)
 POLL_INTERVAL = 60            # 每 60 秒拉取一次
+
+#  CA 证书
+ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 # 推送给 xtqmt 的 UDP 地址
 CODES_PUSH_HOST = "127.0.0.1"
@@ -114,7 +119,7 @@ async def _report_worker(queue: asyncio.Queue, session: aiohttp.ClientSession):
         payload = _build_payload(tick)
         logging.info("[Reporter] 上报 payload: %s", payload)
         try:
-            async with session.post(REPORT_URL, json=[payload], timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.post(REPORT_URL, json=[payload], timeout=aiohttp.ClientTimeout(total=10), ssl=ssl_ctx) as resp:
                 resp.raise_for_status()
                 logging.info("[Reporter] 上报成功 状态码=%s", resp.status)
         except aiohttp.ClientResponseError as e:
@@ -134,7 +139,7 @@ async def _fetch_runtime_codes(session: aiohttp.ClientSession) -> tuple[list[str
     返回 (代码列表, lastUpdateTime)；失败时列表为 None。
     """
     try:
-        async with session.get(RUNTIME_CODE_URL, timeout=API_TIMEOUT) as resp:
+        async with session.get(RUNTIME_CODE_URL, timeout=API_TIMEOUT, ssl=ssl_ctx) as resp:
             resp.raise_for_status()
             result = await resp.json()
     except aiohttp.ClientResponseError as e:
@@ -147,7 +152,7 @@ async def _fetch_runtime_codes(session: aiohttp.ClientSession) -> tuple[list[str
         logging.warning("[Reporter] 拉取股票代码失败（JSON 解析错误）: %s", e)
         return None, 0
 
-    if not result.get("success"):
+    if result.get("resultCode") != 0:
         logging.warning("[Reporter] 拉取股票代码失败（业务错误）: %s", result.get("message"))
         return None, 0
 
@@ -219,7 +224,7 @@ async def _upload_stock_base(session: aiohttp.ClientSession) -> bool:
         with open(STOCK_BASE_FILE, "rb") as f:
             data = aiohttp.FormData()
             data.add_field("file", f, filename="stock_base.txt", content_type="text/plain")
-            async with session.post(UPLOAD_URL, data=data, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+            async with session.post(UPLOAD_URL, data=data, timeout=aiohttp.ClientTimeout(total=300), ssl=ssl_ctx) as resp:
                 resp.raise_for_status()
                 body = await resp.json()
     except aiohttp.ClientResponseError as e:
@@ -290,9 +295,9 @@ async def main():
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(connector=connector) as session:
         await asyncio.gather(
-            _report_worker(queue, session),
+            # _report_worker(queue, session),
             _codes_poller(session),
-            _stock_base_uploader(session),
+            # _stock_base_uploader(session),
         )
 
     transport.close()
