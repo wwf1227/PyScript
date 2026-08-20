@@ -23,8 +23,9 @@ import certifi
 import ssl
 
 API_HOST = "https://wkatt1.tingyun.com"
+AD_API_HOST = "https://wkadt1.tingyun.com"
 
-REPORT_URL  = f"{API_HOST}/appdatasvr/finbench/v1/data/standard-dbqmt"
+REPORT_URL  = f"{AD_API_HOST}/appdatasvr/finbench/v1/data/standard"
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 19999
 
@@ -79,6 +80,7 @@ def _build_payload(tick: dict) -> dict:
         "high":       tick["high"],
         "low":        tick["low"],
         "cum_volume": tick["cum_volume"],
+        "cum_amount": tick["cum_amount"],
         "timestamp":  tick["created_at"],   # 已是毫秒时间戳，无需转换
         "source":     source,
     }
@@ -119,11 +121,21 @@ async def _report_worker(queue: asyncio.Queue, session: aiohttp.ClientSession):
         payload = _build_payload(tick)
         logging.info("[Reporter] 上报 payload: %s", payload)
         try:
-            async with session.post(REPORT_URL, json=[payload], timeout=aiohttp.ClientTimeout(total=10), ssl=ssl_ctx) as resp:
+            async with session.post(
+                REPORT_URL,
+                json=[payload],
+                timeout=aiohttp.ClientTimeout(total=10),
+                ssl=ssl_ctx,
+            ) as resp:
                 resp.raise_for_status()
                 logging.info("[Reporter] 上报成功 状态码=%s", resp.status)
         except aiohttp.ClientResponseError as e:
-            body = await e.response.text() if e.response else ""
+            body = ""
+            if "resp" in locals():  # 确保 resp 已定义
+                try:
+                    body = await resp.text()
+                except Exception:
+                    body = "<无法读取响应体>"
             logging.error("[Reporter] 上报失败 HTTP=%s body=%s", e.status, body)
         except Exception as e:
             logging.error("[Reporter] 上报异常: %s", e)
@@ -228,8 +240,13 @@ async def _upload_stock_base(session: aiohttp.ClientSession) -> bool:
                 resp.raise_for_status()
                 body = await resp.json()
     except aiohttp.ClientResponseError as e:
-        body_text = await e.response.text() if e.response else ""
-        logging.error("[Reporter] 上传股票基础数据失败 HTTP=%s body=%s", e.status, body_text)
+        body = ""
+        if "resp" in locals():  # 确保 resp 已定义
+            try:
+                body = await resp.text()
+            except Exception:
+                body = "<无法读取响应体>"
+        logging.error("[Reporter] 上传股票基础数据失败 HTTP=%s body=%s", e.status, body)
         return False
     except Exception as e:
         logging.error("[Reporter] 上传股票基础数据异常: %s", e)
