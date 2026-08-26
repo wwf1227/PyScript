@@ -210,3 +210,6 @@ data
 
 .idea/
 *.xlsx
+
+# 运行时日志落盘（含 TimedRotatingFileHandler 轮转出的 *.log.日期）
+logs/

@@ -13,6 +13,8 @@ import asyncio
 import datetime
 import json
 import logging
+from logging.handlers import TimedRotatingFileHandler
+import os
 import signal
 import socket
 import threading
@@ -33,7 +35,7 @@ PURGE_INTERVAL = 86400      # 归档清理周期：每 24 小时执行一次（�
 # 接收 tick_reporter 推送股票代码的 UDP 监听地址
 CODES_LISTEN_HOST = "127.0.0.1"
 CODES_LISTEN_PORT = 19998
-CODES_RECV_TIMEOUT = 60     # UDP 接收超时（秒），超时后检查 shutdown
+CODES_RECV_TIMEOUT = 1      # UDP 接收超时（秒），短超时以便及时检查 shutdown 退出信号
 
 # 股票基础数据每日采集时间（开盘 09:30 前）
 COLLECT_HOUR = 8
@@ -42,14 +44,29 @@ COLLECT_RETRY_HOUR = 9      # 采集失败时重试到 09:30
 COLLECT_RETRY_MINUTE = 30
 
 
+# ── 日志落盘（每日轮转，保留 30 天，UTF-8）──
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [XtWriter] %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        TimedRotatingFileHandler(
+            os.path.join(LOG_DIR, "xtqmt.log"),
+            when="midnight",
+            backupCount=30,
+            encoding="utf-8",
+        ),
+    ],
 )
 
 # ─────────────────────── 全局状态 ───────────────────────
 _queue: asyncio.Queue | None = None
 _shutdown: asyncio.Event | None = None
+# 主线程退出信号（线程安全），Ctrl+C 时置位，主循环据此跳出
+_main_shutdown = threading.Event()
 _loop: asyncio.AbstractEventLoop | None = None
 _udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -281,26 +298,26 @@ def tick_callback(datas):
             "created_at":   raw_tick.get("time", 0),
         }
 
-        print(tick_data)
+        # print(tick_data)
 
         # 1. UDP 实时推送给 Reporter（同步发送，微秒级，不阻塞回调）
-        # try:
-        #     _udp_sock.sendto(
-        #         json.dumps(tick_data).encode("utf-8"),
-        #         (REPORTER_HOST, REPORTER_PORT),
-        #     )
-        #     logging.info(
-        #         "[XtWriter] UDP 已推送: ts=%s price=%s",
-        #         tick_data["created_at"], tick_data["price"],
-        #     )
-        # except Exception as e:
-        #     logging.warning("[XtWriter] UDP 发送失败: %s", e)
+        try:
+            _udp_sock.sendto(
+                json.dumps(tick_data).encode("utf-8"),
+                (REPORTER_HOST, REPORTER_PORT),
+            )
+            logging.info(
+                "[XtWriter] UDP 已推送: ts=%s price=%s",
+                tick_data["created_at"], tick_data["price"],
+            )
+        except Exception as e:
+            logging.warning("[XtWriter] UDP 发送失败: %s", e)
 
-        # # 2. 异步写 DB 归档（队列满时丢弃，不影响实时推送）
-        # try:
-        #     _loop.call_soon_threadsafe(_queue.put_nowait, tick_data)
-        # except asyncio.QueueFull:
-        #     logging.warning("[XtWriter] 归档队列已满，丢弃本条备份")
+        # 2. 异步写 DB 归档（队列满时丢弃，不影响实时推送）
+        try:
+            _loop.call_soon_threadsafe(_queue.put_nowait, tick_data)
+        except asyncio.QueueFull:
+            logging.warning("[XtWriter] 归档队列已满，丢弃本条备份")
 
 
 # ─────────────────────── 启动 / 退出 ───────────────────────
@@ -311,7 +328,8 @@ def _trigger_shutdown():
 
 
 def _signal_handler(signum, frame):
-    logging.info("[XtWriter] 收到退出信号，开始优雅关闭...")
+    logging.info("[XtWriter] 收到退出信号，关闭中...")
+    _main_shutdown.set()
     _trigger_shutdown()
 
 
@@ -342,7 +360,7 @@ _stock_base_thread.start()
 _codes_sock = _setup_codes_listener()
 
 try:
-    while True:
+    while not _main_shutdown.is_set():
         new_codes, last_update = receive_codes_from_udp(_codes_sock)
 
         if new_codes is not None:
@@ -351,8 +369,6 @@ try:
             update_subscriptions(new_codes)
         # else: UDP 超时（reporter 可能挂了或网络问题），保持现有订阅不变，继续等待
 
-except KeyboardInterrupt:
-    logging.info("[XtWriter] 收到 KeyboardInterrupt")
 finally:
     _codes_sock.close()
     for code, seq in _sub_ids.items():

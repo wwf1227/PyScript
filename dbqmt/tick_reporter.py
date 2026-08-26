@@ -5,7 +5,7 @@ tick_reporter.py  ——  普通网络进程
 职责：
   1. 监听 UDP 端口，接收 xtqmt 实时推送的 tick
   2. 通过 aiohttp（连接池复用）上报到外部平台
-  3. 定期从 API 拉取运行时股票代码，变化时通过 UDP 推送给 xtqmt
+  3. 定期从 API 拉取运行时股票代码，每次都通过 UDP 推送给 xtqmt（由 xtqmt 端做增量订阅）
   4. 每天上传 xtqmt 采集的股票/指数基础数据到服务端
 """
 
@@ -13,6 +13,7 @@ import asyncio
 import datetime
 import json
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import os
 import signal
 import socket
@@ -46,9 +47,22 @@ UPLOAD_URL = f"{API_HOST}/apptasksvr/stock-manager/upload-code-data"
 STOCK_BASE_FILE = "stock_base.txt"          # xtqmt 采集写入的共享文件
 UPLOAD_CHECK_INTERVAL = 60                  # 每分钟检查一次是否有新文件
 
+# ── 日志落盘（每日轮转，保留 30 天，UTF-8）──
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [Reporter] %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        TimedRotatingFileHandler(
+            os.path.join(LOG_DIR, "tick_reporter.log"),
+            when="midnight",
+            backupCount=30,
+            encoding="utf-8",
+        ),
+    ],
 )
 
 _shutdown: asyncio.Event | None = None
@@ -199,31 +213,31 @@ def _push_codes_via_udp(codes: list[str], last_update: int) -> None:
 
 async def _codes_poller(session: aiohttp.ClientSession):
     """
-    定期从 API 拉取股票代码，仅变化时推送给 xtqmt。
+    定期从 API 拉取股票代码，每次拉取都推送给 xtqmt。
+    是否变化、是否增量订阅由 xtqmt 端判断（update_subscriptions 幂等）：
+      - 代码未变化时，xtqmt 的 _diff_codes 结果为 no-op；
+      - xtqmt 重启后 _sub_ids 为空，收到的代码会全部重新订阅。
     启动时立即拉取并推送一次，之后每 POLL_INTERVAL 秒拉取一次。
     """
-    last_codes: list[str] | None = None
+    first = True
 
     while True:
         # 等待 POLL_INTERVAL 秒或 shutdown（首次跳过等待）
-        if last_codes is not None:
+        if not first:
             try:
                 await asyncio.wait_for(_shutdown.wait(), timeout=POLL_INTERVAL)
                 break  # shutdown 触发
             except asyncio.TimeoutError:
                 pass
+        first = False
 
         codes, last_update = await _fetch_runtime_codes(session)
         if codes is None:
             logging.warning("[Reporter] 拉取股票代码失败，保留上次列表不变")
             continue
 
-        # 仅在有变化时推送（首次必须推送）
-        if last_codes is None or set(codes) != set(last_codes):
-            _push_codes_via_udp(codes, last_update)
-            last_codes = codes
-        else:
-            logging.debug("[Reporter] 股票代码未变化，跳过推送")
+        # 每次都推，xtqmt 端用 _diff_codes 做增量订阅
+        _push_codes_via_udp(codes, last_update)
 
     logging.info("[Reporter] 股票代码拉取任务已退出")
 
