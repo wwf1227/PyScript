@@ -284,6 +284,8 @@ async def _stock_base_uploader(session: aiohttp.ClientSession):
     每天最多上传一次，避免重复（上传本身幂等，重复也无害）；失败会重试。
     """
     last_upload_date = None
+    logging.info("[Reporter] 股票基础数据上传任务已启动（每 %d 秒检查 %s）",
+                 UPLOAD_CHECK_INTERVAL, STOCK_BASE_FILE)
     while True:
         try:
             await asyncio.wait_for(_shutdown.wait(), timeout=UPLOAD_CHECK_INTERVAL)
@@ -293,13 +295,20 @@ async def _stock_base_uploader(session: aiohttp.ClientSession):
 
         try:
             if not os.path.exists(STOCK_BASE_FILE):
+                logging.debug("[Reporter] %s 不存在，等待 xtqmt 生成...", STOCK_BASE_FILE)
                 continue
             file_date = datetime.date.fromtimestamp(os.path.getmtime(STOCK_BASE_FILE))
             today = datetime.date.today()
             # 仅上传当天新生成的文件，且当天只上传成功一次
-            if file_date == today and last_upload_date != today:
-                if await _upload_stock_base(session):
-                    last_upload_date = today
+            if file_date != today:
+                logging.debug("[Reporter] %s 非当天生成（%s），跳过", STOCK_BASE_FILE, file_date)
+                continue
+            if last_upload_date == today:
+                logging.debug("[Reporter] 今天已上传过 %s，跳过", STOCK_BASE_FILE)
+                continue
+            logging.info("[Reporter] 发现当天 %s（%s），开始上传...", STOCK_BASE_FILE, file_date)
+            if await _upload_stock_base(session):
+                last_upload_date = today
         except Exception:
             logging.exception("[Reporter] 股票基础数据上传检查异常")
 
