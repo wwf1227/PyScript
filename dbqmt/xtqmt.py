@@ -45,6 +45,8 @@ COLLECT_RETRY_MINUTE = 30
 
 
 # ── 日志落盘（每日轮转，保留 30 天，UTF-8）──
+# 不写控制台：Windows 控制台一旦进入「快速编辑/选择模式」，会把高频日志写满缓冲区并阻塞进程。
+# 日志只落盘；控制台仅保留进程崩溃时的 traceback（由解释器直接写 stderr，不经 logging）。
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -52,7 +54,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [XtWriter] %(levelname)s %(message)s",
     handlers=[
-        logging.StreamHandler(),
         TimedRotatingFileHandler(
             os.path.join(LOG_DIR, "xtqmt.log"),
             when="midnight",
