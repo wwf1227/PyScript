@@ -43,6 +43,16 @@ COLLECT_MINUTE = 30
 COLLECT_RETRY_HOUR = 9      # 采集失败时重试到 09:30
 COLLECT_RETRY_MINUTE = 30
 
+# 每日重订阅时间（集合竞价 09:15 起），应对 QMT tick 订阅跨交易日失效
+RESUBSCRIBE_HOUR = 9
+RESUBSCRIBE_MINUTE = 15
+
+# 看门狗：交易时段内连续无 tick 自动重订阅，兜底盘中断连
+WATCHDOG_CHECK_INTERVAL = 60        # 检查间隔（秒）
+WATCHDOG_NO_TICK_SECONDS = 600      # 连续 10 分钟无 tick 视为订阅失效
+WATCHDOG_COOLDOWN_SECONDS = 600     # 两次自动重订阅的最小间隔
+WATCHDOG_MAX_PER_DAY = 10           # 每天最多自动重订阅次数（节假日/长时间停牌兜底）
+
 
 # ── 日志落盘（每日轮转，保留 30 天，UTF-8）──
 # 不写控制台：Windows 控制台一旦进入「快速编辑/选择模式」，会把高频日志写满缓冲区并阻塞进程。
@@ -80,6 +90,13 @@ _sub_lock = threading.Lock()
 _last_update_time: int = 0
 # 采集线程与订阅更新共用，避免 xtdata 并发调用
 _xtdata_lock = threading.Lock()
+
+# 看门狗状态
+_last_tick_time = time.time()        # 最近一次收到 tick 的时间戳（tick_callback 更新）
+_last_resubscribe_time = time.time() # 最近一次重订阅的时间戳（_resubscribe_all 更新）
+_resubscribe_count = 0               # 当天看门狗自动重订阅次数
+_resubscribe_count_date = None
+_watchdog_lock = threading.Lock()
 
 
 # ─────────────────────── 归档任务 ───────────────────────
@@ -230,6 +247,86 @@ def update_subscriptions(new_codes: list[str]):
         )
 
 
+def _resubscribe_all():
+    """强制退订并重新订阅当前所有代码，应对 QMT tick 订阅跨交易日失效"""
+    global _last_resubscribe_time
+    with _xtdata_lock:
+        codes = list(_sub_ids.keys())
+        for code in codes:
+            seq = _sub_ids.pop(code, None)
+            if seq is not None:
+                try:
+                    xtdata.unsubscribe_quote(seq)
+                except Exception as e:
+                    logging.warning("[XtWriter] 重订阅：退订 %s 失败: %s", code, e)
+
+    # _sub_ids 已清空，update_subscriptions 会把所有代码当作新增重新订阅
+    update_subscriptions(codes)
+    _last_resubscribe_time = time.time()
+    logging.info("[XtWriter] 每日重订阅完成，当前 %d 个标的", len(_sub_ids))
+
+
+def _daily_resubscribe_scheduler():
+    """每天 09:15（集合竞价前）对当前订阅强制重订阅一次，应对跨交易日失效"""
+    done_date = None
+    while True:
+        now = datetime.datetime.now()
+        in_window = (now.hour, now.minute) >= (RESUBSCRIBE_HOUR, RESUBSCRIBE_MINUTE)
+        if in_window and done_date != now.date():
+            if _sub_ids:
+                _resubscribe_all()
+            done_date = now.date()
+        time.sleep(30)
+
+
+def _is_trading_time(now: datetime.datetime) -> bool:
+    """判断是否 A 股交易时段（工作日 09:30-11:30 / 13:00-15:00）"""
+    if now.weekday() >= 5:  # 周六、周日
+        return False
+    hm = (now.hour, now.minute)
+    return (9, 30) <= hm <= (11, 30) or (13, 0) <= hm <= (15, 0)
+
+
+def _mark_tick_received():
+    """记录最近一次收到 tick 的时间，供看门狗判断订阅是否失效"""
+    global _last_tick_time
+    _last_tick_time = time.time()
+
+
+def _watchdog_scheduler():
+    """交易时段内连续无 tick 达阈值则强制重订阅，兜底盘中断连"""
+    global _resubscribe_count, _resubscribe_count_date
+    while True:
+        time.sleep(WATCHDOG_CHECK_INTERVAL)
+        now = datetime.datetime.now()
+        if not _is_trading_time(now):
+            continue
+        if not _sub_ids:
+            continue
+        if time.time() - _last_tick_time < WATCHDOG_NO_TICK_SECONDS:
+            continue  # 有 tick 在流，订阅正常
+        if time.time() - _last_resubscribe_time < WATCHDOG_COOLDOWN_SECONDS:
+            continue  # 刚重订阅过，给点时间恢复
+
+        with _watchdog_lock:
+            today = now.date()
+            if _resubscribe_count_date != today:
+                _resubscribe_count_date = today
+                _resubscribe_count = 0
+            allowed = _resubscribe_count < WATCHDOG_MAX_PER_DAY
+            if allowed:
+                _resubscribe_count += 1
+
+        if not allowed:
+            continue
+
+        logging.warning(
+            "[XtWriter] 已 %d 秒无 tick，触发看门狗重订阅（当天第 %d 次）",
+            int(time.time() - _last_tick_time), _resubscribe_count,
+        )
+        _resubscribe_all()
+
+
 # ─────────────────────── 股票基础数据采集 ───────────────────────
 
 def _stock_base_scheduler():
@@ -270,6 +367,8 @@ def tick_callback(datas):
       - list:  [tick, ...]  （订阅单标的时常见）
     每条 tick 统一映射为与 tick_writer 相同的字段结构后推送。
     """
+    _mark_tick_received()
+
     if isinstance(datas, dict):
         items = [
             (code, tick)
@@ -355,6 +454,14 @@ logging.info("[XtWriter] 后台线程已就绪")
 # 启动股票基础数据采集线程（daemon，随进程退出）
 _stock_base_thread = threading.Thread(target=_stock_base_scheduler, name="StockBaseScheduler", daemon=True)
 _stock_base_thread.start()
+
+# 启动每日重订阅线程（daemon，随进程退出）
+_resubscribe_thread = threading.Thread(target=_daily_resubscribe_scheduler, name="ResubscribeScheduler", daemon=True)
+_resubscribe_thread.start()
+
+# 启动看门狗线程（daemon，随进程退出）
+_watchdog_thread = threading.Thread(target=_watchdog_scheduler, name="WatchdogScheduler", daemon=True)
+_watchdog_thread.start()
 
 # ─────────────────────── 主循环：实时接收代码推送 + 增量订阅 ───────────────────────
 
