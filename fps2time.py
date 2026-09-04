@@ -19,7 +19,7 @@ SOURCE_SHEET = None          # None=第一个 sheet；或填具体 sheet 名
 RESULT_SHEET = "结果"        # 毫秒结果写入的 sheet 名（已存在则覆盖重建）
 RESULT_SHEET_SEC = "结果(秒)"  # 秒结果写入的 sheet 名（保留 1 位小数）
 
-FPS = 30
+FPS = 60
 FRAME_MS = 1000 / FPS        # 每帧时长（毫秒），30fps 时约 33.33ms
 
 

@@ -2,7 +2,7 @@ import pandas as pd
 from datetime import date, timedelta
 import chinese_calendar as cc
 
-year = 2025
+year = 2026
 start = date(year, 1, 1)
 end = date(year, 12, 31)
 
@@ -46,7 +46,7 @@ df_makeup = pd.DataFrame(
 )
 
 # 写入 Excel 多个 Sheet
-file_name = "2025_中国日历.xlsx"
+file_name = "2026_中国日历.xlsx"
 with pd.ExcelWriter(file_name, engine="openpyxl") as writer:
     df_work.to_excel(writer, sheet_name="工作日", index=False)
     df_holiday.to_excel(writer, sheet_name="法定节假日", index=False)
