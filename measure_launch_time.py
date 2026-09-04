@@ -21,6 +21,9 @@ import sys
 
 from logger import Logger
 
+# 确保日志/结果输出目录存在，不存在则自动创建
+os.makedirs("launch_time", exist_ok=True)
+
 logger_file = f"launch_time/start_time_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 logger = Logger(logger_file)
 
@@ -168,7 +171,9 @@ def main():
                 "MainActivity": main_activity.split("/")[-1],
                 "versionName": version_name,
                 "AvgTotalTime(s)": round(avg_total / 1000, 2),
+                "AvgTotalTime(ms)": round(avg_total),
                 "AvgTrimmed(s)": round(avg_trimmed / 1000, 2),
+                "AvgTrimmed(ms)": round(avg_trimmed),
                 # "AvgWaitTime(ms)": avg_wait,
                 # "AvgTTID(ms)": avg_ttid
             }
