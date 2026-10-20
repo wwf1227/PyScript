@@ -32,7 +32,7 @@ def classify(code: str):
     num, ex = code.split(".", 1)
     if len(num) != 6 or not num.isdigit():
         return None
-    h2, h3 = num[:2], num[:3]
+    h1, h2, h3 = num[:1], num[:2], num[:3]
 
     if ex == "SH":
         if h3 in ("600", "601", "603", "605"):
@@ -51,6 +51,9 @@ def classify(code: str):
             return "指数", "国证系列"
         if h3 == "000":
             return "指数", "上证系列"
+        if h1 == "5":
+            return "指数", "上证系列"
+
 
     elif ex == "SZ":
         if h3 in ("000", "001", "003"):
@@ -62,6 +65,8 @@ def classify(code: str):
         if h3 == "200":
             return "股票", "B股"
         if h3 == "399":
+            return "指数", "深证系列"
+        if h1 == "1":
             return "指数", "深证系列"
 
     elif ex == "BJ":
@@ -121,10 +126,13 @@ def write_stock_base_file(rows: list[tuple[str, str, str, str]], path: str = STO
     """原子写入制表符分隔的 4 列文本（先写临时文件再 rename）"""
     dirname = os.path.dirname(os.path.abspath(path)) or "."
     with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=dirname, delete=False, suffix=".tmp"
+            mode="w", encoding="utf-8", dir=dirname, delete=False, suffix=".tmp"
     ) as f:
         for row in rows:
             f.write(SEP.join(row) + "\n")
         tmp_path = f.name
     os.replace(tmp_path, path)
     logging.info("[stock_base] 已写入 %d 条记录到 %s", len(rows), path)
+
+if __name__ == '__main__':
+    write_stock_base_file(collect_stock_base(), STOCK_BASE_FILE)
